@@ -68,7 +68,7 @@ jobs:
           RD_TARGET_URL: ${{ github.event.client_payload.target_url }}
           RD_OPENAPI_URL: ${{ github.event.client_payload.openapi_url }}
           RD_DAST_MODE: ${{ github.event.client_payload.dast_mode }}
-        run: ./scripts/normalize-inputs.sh
+        run: bash ./scripts/normalize-inputs.sh
 
   sast:
     needs: validate
@@ -81,14 +81,14 @@ jobs:
           GH_TOKEN: ${{ secrets.SECURITY_REPO_TOKEN }}
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
           TARGET_SHA: ${{ needs.validate.outputs.sha }}
-        run: ./scripts/clone-target.sh
+        run: bash ./scripts/clone-target.sh
       - name: Detect application type
         id: detect
         env:
           REQUESTED_APP_TYPE: ${{ needs.validate.outputs.app_type }}
-        run: ./scripts/detect-app.sh target | tee detection.env
+        run: bash ./scripts/detect-app.sh target | tee detection.env
       - name: Run Semgrep CE
-        run: ./scripts/run-semgrep.sh target reports
+        run: bash ./scripts/run-semgrep.sh target reports
       - name: Create OWASP mapping and summary
         env:
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
@@ -113,13 +113,13 @@ jobs:
         env:
           TARGET_URL: ${{ needs.validate.outputs.target_url }}
           ALLOWED_TARGET_SUFFIXES: ${{ vars.ALLOWED_TARGET_SUFFIXES }}
-        run: ./scripts/validate-target.sh
+        run: bash ./scripts/validate-target.sh
       - name: Run OWASP ZAP
         env:
           TARGET_URL: ${{ needs.validate.outputs.target_url }}
           OPENAPI_URL: ${{ needs.validate.outputs.openapi_url }}
           DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
-        run: ./scripts/run-zap.sh reports
+        run: bash ./scripts/run-zap.sh reports
       - name: Map ZAP findings to OWASP WSTG and ASVS
         env:
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}

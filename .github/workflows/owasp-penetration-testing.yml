@@ -72,7 +72,7 @@ jobs:
           RD_TARGET_URL: ${{ github.event.client_payload.target_url }}
           RD_OPENAPI_URL: ${{ github.event.client_payload.openapi_url }}
           RD_DAST_MODE: ${{ github.event.client_payload.dast_mode }}
-        run: ./scripts/normalize-inputs.sh
+        run: bash ./scripts/normalize-inputs.sh
 
   app-prep:
     needs: validate
@@ -84,17 +84,17 @@ jobs:
           GH_TOKEN: ${{ secrets.SECURITY_REPO_TOKEN }}
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
           TARGET_SHA: ${{ needs.validate.outputs.sha }}
-        run: ./scripts/clone-target.sh
+        run: bash ./scripts/clone-target.sh
       - name: Detect application type
         env:
           REQUESTED_APP_TYPE: ${{ needs.validate.outputs.app_type }}
-        run: ./scripts/detect-app.sh target | tee detection.env
+        run: bash ./scripts/detect-app.sh target | tee detection.env
       - name: Validate target safety
         if: ${{ needs.validate.outputs.target_url != '' && needs.validate.outputs.dast_mode != 'none' }}
         env:
           TARGET_URL: ${{ needs.validate.outputs.target_url }}
           ALLOWED_TARGET_SUFFIXES: ${{ vars.ALLOWED_TARGET_SUFFIXES }}
-        run: ./scripts/validate-target.sh
+        run: bash ./scripts/validate-target.sh
 
   sast:
     needs: [validate, app-prep]
@@ -103,7 +103,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Semgrep CE
-        run: ./scripts/run-semgrep.sh target reports
+        run: bash ./scripts/run-semgrep.sh target reports
       - name: Map findings to OWASP standards
         env:
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
@@ -122,7 +122,7 @@ jobs:
           TARGET_URL: ${{ needs.validate.outputs.target_url }}
           OPENAPI_URL: ${{ needs.validate.outputs.openapi_url }}
           DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
-        run: ./scripts/run-zap.sh reports
+        run: bash ./scripts/run-zap.sh reports
       - name: Map ZAP findings to WSTG and ASVS
         env:
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
