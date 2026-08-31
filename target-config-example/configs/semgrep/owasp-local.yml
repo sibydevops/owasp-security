@@ -1,0 +1,13 @@
+rules:
+  - id: org.detect-eval
+    languages: [javascript, typescript, python]
+    message: Dynamic evaluation can enable injection. Validate necessity and input controls.
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+    metadata:
+      cwe: CWE-95
+      owasp: A03:2021 Injection
+      license: MIT

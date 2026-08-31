@@ -1,0 +1,23 @@
+name: Reusable OWASP Scan
+on:
+  workflow_call:
+    inputs:
+      app_type: {required: false, type: string, default: auto}
+      target_url: {required: false, type: string, default: ''}
+      openapi_url: {required: false, type: string, default: ''}
+      dast_mode: {required: false, type: string, default: baseline}
+    secrets:
+      SECURITY_REPO_TOKEN: {required: false}
+permissions:
+  contents: read
+jobs:
+  scan:
+    uses: ./.github/workflows/central-security.yml
+    with:
+      target_repository: ${{ github.repository }}
+      target_sha: ${{ github.sha }}
+      app_type: ${{ inputs.app_type }}
+      target_url: ${{ inputs.target_url }}
+      openapi_url: ${{ inputs.openapi_url }}
+      dast_mode: ${{ inputs.dast_mode }}
+    secrets: inherit
