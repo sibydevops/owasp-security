@@ -22,7 +22,7 @@ Install Docker, Git, Python 3, GitHub CLI, CA certificates, and internal DNS/CA 
 
 ## 4. Configure authentication
 
-Create `SECURITY_REPO_TOKEN` as an organization secret visible only to the central repository. Prefer a GitHub App installation token broker in production. The token needs read-only Contents access to target repositories. A separate token or GitHub App identity used by the dispatcher needs permission to send repository dispatch events to the central repository.
+For public repositories, no custom token is required because the workflow can clone anonymously. For private repositories or restricted access, create `SECURITY_REPO_TOKEN` as an organization secret visible only to the central repository. Prefer a GitHub App installation token broker in production. The token needs read-only Contents access to target repositories. A separate token or GitHub App identity used by the dispatcher needs permission to send repository dispatch events to the central repository.
 
 ## 5. Configure organization variables
 
