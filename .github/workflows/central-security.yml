@@ -1,5 +1,5 @@
 name: Central OWASP Security Scan
-run-name: Security scan ${{ inputs.target_repository || github.event.client_payload.target_repository }}@${{ inputs.target_sha || github.event.client_payload.target_sha }}
+run-name: Security scan ${{ inputs.target_repository || github.event.client_payload.target_repository || github.repository }}@${{ inputs.target_sha || github.event.client_payload.target_sha || github.sha }}
 
 on:
   workflow_dispatch:
@@ -36,7 +36,7 @@ on:
     types: [owasp-security-scan]
 
 concurrency:
-  group: security-${{ inputs.target_repository || github.event.client_payload.target_repository }}-${{ inputs.target_sha || github.event.client_payload.target_sha }}
+  group: security-${{ inputs.target_repository || github.event.client_payload.target_repository || github.repository }}-${{ inputs.target_sha || github.event.client_payload.target_sha || github.sha }}
   cancel-in-progress: false
 
 permissions:
@@ -56,14 +56,14 @@ jobs:
       - uses: actions/checkout@v4
       - id: input
         env:
-          WD_REPOSITORY: ${{ inputs.target_repository }}
-          WD_SHA: ${{ inputs.target_sha }}
+          WD_REPOSITORY: ${{ inputs.target_repository || github.repository }}
+          WD_SHA: ${{ inputs.target_sha || github.sha }}
           WD_APP_TYPE: ${{ inputs.app_type }}
           WD_TARGET_URL: ${{ inputs.target_url }}
           WD_OPENAPI_URL: ${{ inputs.openapi_url }}
           WD_DAST_MODE: ${{ inputs.dast_mode }}
-          RD_REPOSITORY: ${{ github.event.client_payload.target_repository }}
-          RD_SHA: ${{ github.event.client_payload.target_sha }}
+          RD_REPOSITORY: ${{ github.event.client_payload.target_repository || github.repository }}
+          RD_SHA: ${{ github.event.client_payload.target_sha || github.sha }}
           RD_APP_TYPE: ${{ github.event.client_payload.app_type }}
           RD_TARGET_URL: ${{ github.event.client_payload.target_url }}
           RD_OPENAPI_URL: ${{ github.event.client_payload.openapi_url }}
