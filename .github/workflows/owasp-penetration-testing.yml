@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Clone exact target commit
         env:
-          GH_TOKEN: ${{ secrets.SECURITY_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.SECURITY_REPO_TOKEN != '' && secrets.SECURITY_REPO_TOKEN || github.token }}
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
           TARGET_SHA: ${{ needs.validate.outputs.sha }}
         run: bash ./scripts/clone-target.sh
