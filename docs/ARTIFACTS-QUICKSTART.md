@@ -131,3 +131,20 @@ For detailed information about each format and integration patterns, see:
 - [📚 ARTIFACT-FORMATS.md](ARTIFACT-FORMATS.md) - Complete documentation
 - [🚀 IMPLEMENTATION-GUIDE.md](IMPLEMENTATION-GUIDE.md) - Setup instructions
 - [🔐 OWASP-PENETRATION-TESTING-WORKFLOW.md](OWASP-PENETRATION-TESTING-WORKFLOW.md) - Full workflow guide
+
+---
+
+## ⚠️ MANDATORY: Complete Your Security Assessment
+
+These automated scan reports are **the first step** in a comprehensive security program. You **MUST** follow the complete OWASP Penetration Testing Workflow:
+
+**[→ Read OWASP-PENETRATION-TESTING-WORKFLOW.md](OWASP-PENETRATION-TESTING-WORKFLOW.md)**
+
+This includes:
+- ✓ Manual OWASP Web Security Testing Guide (WSTG) procedures
+- ✓ Evidence collection and documentation
+- ✓ Finding validation and retesting
+- ✓ Remediation tracking
+- ✓ Compliance validation (ASVS, PCI-DSS, etc.)
+
+**Automated scanning alone is insufficient for a complete security assessment.**

@@ -1,5 +1,7 @@
 # Central OWASP Security Workflow for GitHub
 
+> ⚠️ **IMPORTANT**: This automated scanning workflow is part of the **OWASP Penetration Testing Workflow**. See [docs/OWASP-PENETRATION-TESTING-WORKFLOW.md](docs/OWASP-PENETRATION-TESTING-WORKFLOW.md) for the complete authorized assessment lifecycle, including manual testing, evidence collection, and remediation.
+
 A central GitHub Actions reference implementation for scanning a changed repository and exact commit with:
 
 - Semgrep Community Edition SAST using open-source OWASP-oriented rules

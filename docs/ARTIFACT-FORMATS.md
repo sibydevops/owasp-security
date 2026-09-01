@@ -294,3 +294,17 @@ To customize report generation:
 - All scripts use UTF-8 encoding
 - Ensure terminal/editor supports UTF-8
 - Check file encoding if display issues occur
+
+---
+
+## ⚠️ MANDATORY: OWASP Penetration Testing Workflow
+
+These automated artifacts are part of a **comprehensive security assessment lifecycle**. For complete authorized security testing, including manual testing, evidence collection, and remediation tracking:
+
+📖 **[See OWASP-PENETRATION-TESTING-WORKFLOW.md](../docs/OWASP-PENETRATION-TESTING-WORKFLOW.md)** for the full authorized assessment lifecycle including:
+- Manual OWASP Web Security Testing Guide (WSTG) procedures
+- Evidence collection and documentation
+- Remediation tracking and retesting
+- Compliance validation (ASVS, PCI-DSS, etc.)
+
+**Note**: Automated scanning (SAST and DAST) identifies many issues but cannot replace comprehensive manual testing. Use these artifacts as part of a complete security assessment program.
