@@ -119,7 +119,7 @@ def generate_semgrep_html(semgrep_json_path, output_path):
 """
 
     # Count findings by severity
-    severity_counts = {{}}
+    severity_counts = {}
     for result in results:
         sev = result.get('extra', {}).get('severity', 'UNKNOWN').upper()
         severity_counts[sev] = severity_counts.get(sev, 0) + 1
