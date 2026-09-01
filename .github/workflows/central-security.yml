@@ -70,6 +70,7 @@ jobs:
       - id: input
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
+          STAGING_URL: ${{ secrets.STAGING_URL || '' }}
           WD_REPOSITORY: ${{ inputs.target_repository || github.repository }}
           WD_SHA: ${{ inputs.target_sha || github.sha }}
           WD_APP_TYPE: ${{ inputs.app_type }}
@@ -82,14 +83,12 @@ jobs:
           RD_TARGET_URL: ${{ github.event.client_payload.target_url }}
           RD_OPENAPI_URL: ${{ github.event.client_payload.openapi_url }}
           RD_DAST_MODE: ${{ github.event.client_payload.dast_mode }}
-          SCHEDULED_TARGET_URL: ${{ secrets.STAGING_URL || '' }}
-          SCHEDULED_DAST_MODE: ${{ github.event_name == 'schedule' && 'baseline' || 'none' }}
         run: bash ./scripts/normalize-inputs.sh
 
   sast:
     needs: validate
     runs-on: [self-hosted, linux, security]
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Clone exact target commit
@@ -122,7 +121,7 @@ jobs:
     needs: [validate, sast]
     if: ${{ needs.validate.outputs.dast_mode != 'none' && needs.validate.outputs.target_url != '' }}
     runs-on: [self-hosted, linux, security]
-    timeout-minutes: 90
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Validate authorization and target safety
