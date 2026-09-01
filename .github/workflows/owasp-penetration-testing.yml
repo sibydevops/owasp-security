@@ -20,7 +20,7 @@ on:
         type: string
 
       target_sha:
-        description: Exact commit SHA to assess
+        description: Exact 40-character commit SHA to assess
         required: true
         type: string
 
@@ -38,12 +38,12 @@ on:
           - library
 
       target_url:
-        description: Optional authorized non-production URL; empty uses local Juice Shop
+        description: Optional authorized test URL; empty uses local Juice Shop
         required: false
         type: string
 
       openapi_url:
-        description: OpenAPI URL for API mode
+        description: OpenAPI URL for API scan mode
         required: false
         type: string
 
@@ -70,7 +70,7 @@ on:
         type: string
 
       target_sha:
-        description: Exact commit SHA to assess
+        description: Exact 40-character commit SHA to assess
         required: true
         type: string
 
@@ -81,13 +81,13 @@ on:
         type: string
 
       target_url:
-        description: Optional authorized non-production URL
+        description: Optional authorized test URL
         required: false
         default: ""
         type: string
 
       openapi_url:
-        description: OpenAPI URL for API mode
+        description: OpenAPI URL for API scan mode
         required: false
         default: ""
         type: string
@@ -111,13 +111,9 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  DEFAULT_APP_TYPE: ${{ vars.DEFAULT_APP_TYPE || 'auto' }}
-  DEFAULT_DAST_MODE: ${{ vars.DEFAULT_DAST_MODE || 'baseline' }}
-
 jobs:
   validate:
-    name: Validate and normalize inputs
+    name: Validate inputs
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -138,14 +134,19 @@ jobs:
         env:
           TARGET_REPOSITORY: >-
             ${{ inputs.target_repository || github.event.client_payload.target_repository || github.repository }}
+
           TARGET_SHA: >-
             ${{ inputs.target_sha || github.event.client_payload.target_sha || github.sha }}
+
           APP_TYPE: >-
             ${{ inputs.app_type || github.event.client_payload.app_type || vars.DEFAULT_APP_TYPE || 'auto' }}
+
           TARGET_URL: >-
             ${{ inputs.target_url || github.event.client_payload.target_url || vars.DAST_TARGET_URL }}
+
           OPENAPI_URL: >-
             ${{ inputs.openapi_url || github.event.client_payload.openapi_url || vars.DAST_OPENAPI_URL }}
+
           DAST_MODE: >-
             ${{ inputs.dast_mode || github.event.client_payload.dast_mode || vars.DEFAULT_DAST_MODE || 'baseline' }}
 
@@ -154,12 +155,12 @@ jobs:
           set -euo pipefail
 
           if [[ ! "$TARGET_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
-            echo "::error::Invalid target repository: $TARGET_REPOSITORY"
+            echo "::error::Invalid repository: $TARGET_REPOSITORY"
             exit 1
           fi
 
           if [[ ! "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::Target SHA must be an exact 40-character commit SHA"
+            echo "::error::Target SHA must be an exact 40-character SHA"
             exit 1
           fi
 
@@ -182,28 +183,89 @@ jobs:
           esac
 
           if [[ "$DAST_MODE" == "api" && -z "$OPENAPI_URL" ]]; then
-            echo "::error::openapi_url is required when dast_mode=api"
+            echo "::error::openapi_url is required for API scan mode"
             exit 1
           fi
 
-          echo "repository=$TARGET_REPOSITORY" >> "$GITHUB_OUTPUT"
-          echo "sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
-          echo "app_type=$APP_TYPE" >> "$GITHUB_OUTPUT"
-          echo "target_url=$TARGET_URL" >> "$GITHUB_OUTPUT"
-          echo "openapi_url=$OPENAPI_URL" >> "$GITHUB_OUTPUT"
-          echo "dast_mode=$DAST_MODE" >> "$GITHUB_OUTPUT"
-
-          if [[ -n "$TARGET_URL" ]]; then
-            echo "External DAST target configured: yes"
-          else
-            echo "External DAST target configured: no"
-            echo "The workflow will use an isolated local OWASP Juice Shop target"
-          fi
+          {
+            echo "repository=$TARGET_REPOSITORY"
+            echo "sha=$TARGET_SHA"
+            echo "app_type=$APP_TYPE"
+            echo "target_url=$TARGET_URL"
+            echo "openapi_url=$OPENAPI_URL"
+            echo "dast_mode=$DAST_MODE"
+          } >> "$GITHUB_OUTPUT"
 
           echo "Repository: $TARGET_REPOSITORY"
           echo "SHA: $TARGET_SHA"
           echo "Application type: $APP_TYPE"
           echo "DAST mode: $DAST_MODE"
+
+          if [[ -n "$TARGET_URL" ]]; then
+            echo "DAST target type: external"
+          else
+            echo "DAST target type: isolated local OWASP Juice Shop"
+          fi
+
+      - name: Create validation YAML report
+        env:
+          TARGET_REPOSITORY: ${{ steps.inputs.outputs.repository }}
+          TARGET_SHA: ${{ steps.inputs.outputs.sha }}
+          APP_TYPE: ${{ steps.inputs.outputs.app_type }}
+          DAST_MODE: ${{ steps.inputs.outputs.dast_mode }}
+          TARGET_URL: ${{ steps.inputs.outputs.target_url }}
+          OPENAPI_URL: ${{ steps.inputs.outputs.openapi_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p validation-reports
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          def quote(value):
+              text = str(value or "")
+              return (
+                  '"'
+                  + text.replace("\\", "\\\\")
+                  .replace('"', '\\"')
+                  .replace("\r", "\\r")
+                  .replace("\n", "\\n")
+                  + '"'
+              )
+
+          target_url = os.getenv("TARGET_URL", "")
+          target_type = "external" if target_url else "local-demo"
+
+          lines = [
+              "validation:",
+              f"  repository: {quote(os.getenv('TARGET_REPOSITORY'))}",
+              f"  sha: {quote(os.getenv('TARGET_SHA'))}",
+              f"  app_type: {quote(os.getenv('APP_TYPE'))}",
+              f"  dast_mode: {quote(os.getenv('DAST_MODE'))}",
+              f"  target_type: {quote(target_type)}",
+              f"  target_url: {quote(target_url)}",
+              f"  openapi_url: {quote(os.getenv('OPENAPI_URL'))}",
+              '  status: "success"',
+          ]
+
+          Path(
+              "validation-reports/validation.yaml"
+          ).write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload validation reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-reports-${{ steps.inputs.outputs.sha }}
+          path: validation-reports/
+          if-no-files-found: error
+          retention-days: 30
 
   app-prep:
     name: Prepare application
@@ -212,6 +274,9 @@ jobs:
 
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
+    outputs:
+      detected_app_type: ${{ steps.detect.outputs.app_type }}
 
     steps:
       - name: Checkout security workflow repository
@@ -226,20 +291,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          rm -rf target
-          git init target
+          if [[ -f scripts/clone-target.sh ]]; then
+            bash scripts/clone-target.sh
+          else
+            rm -rf target
+            git init target
 
-          git -C target remote add origin \
-            "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPOSITORY}.git"
+            git -C target remote add origin \
+              "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPOSITORY}.git"
 
-          git -C target fetch \
-            --depth 1 \
-            origin \
-            "$TARGET_SHA"
+            git -C target fetch \
+              --depth 1 \
+              origin \
+              "$TARGET_SHA"
 
-          git -C target checkout \
-            --detach \
-            FETCH_HEAD
+            git -C target checkout \
+              --detach \
+              FETCH_HEAD
+          fi
 
           actual_sha="$(git -C target rev-parse HEAD)"
 
@@ -248,21 +317,89 @@ jobs:
             exit 1
           fi
 
-          echo "Target repository cloned successfully"
-          echo "Commit: $actual_sha"
+          echo "Target repository cloned at $actual_sha"
 
       - name: Detect application type
+        id: detect
         env:
           REQUESTED_APP_TYPE: ${{ needs.validate.outputs.app_type }}
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ -x scripts/detect-app.sh ]]; then
+          detected="$REQUESTED_APP_TYPE"
+
+          if [[ -f scripts/detect-app.sh ]]; then
             bash scripts/detect-app.sh target | tee detection.env
+
+            script_detected="$(
+              sed -n 's/^APP_TYPE=//p' detection.env |
+              tail -n 1
+            )"
+
+            if [[ -n "$script_detected" ]]; then
+              detected="$script_detected"
+            fi
           else
-            echo "APP_TYPE=$REQUESTED_APP_TYPE" | tee detection.env
+            echo "APP_TYPE=$detected" | tee detection.env
           fi
+
+          case "$detected" in
+            auto|web|api|cloud-native|desktop|library)
+              ;;
+            *)
+              echo "::error::Unsupported detected application type: $detected"
+              exit 1
+              ;;
+          esac
+
+          echo "app_type=$detected" >> "$GITHUB_OUTPUT"
+          echo "Detected application type: $detected"
+
+      - name: Create preparation YAML report
+        env:
+          TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
+          TARGET_SHA: ${{ needs.validate.outputs.sha }}
+          DETECTED_APP_TYPE: ${{ steps.detect.outputs.app_type }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p prep-reports
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          def quote(value):
+              text = str(value or "")
+              return (
+                  '"'
+                  + text.replace("\\", "\\\\")
+                  .replace('"', '\\"')
+                  .replace("\r", "\\r")
+                  .replace("\n", "\\n")
+                  + '"'
+              )
+
+          lines = [
+              "application_preparation:",
+              f"  repository: {quote(os.getenv('TARGET_REPOSITORY'))}",
+              f"  sha: {quote(os.getenv('TARGET_SHA'))}",
+              (
+                  "  detected_app_type: "
+                  + quote(os.getenv("DETECTED_APP_TYPE"))
+              ),
+              '  clone_status: "success"',
+          ]
+
+          Path(
+              "prep-reports/application-preparation.yaml"
+          ).write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8",
+          )
+          PY
 
       - name: Upload prepared target
         uses: actions/upload-artifact@v4
@@ -274,6 +411,14 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
+
+      - name: Upload preparation reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: preparation-reports-${{ needs.validate.outputs.sha }}
+          path: prep-reports/
+          if-no-files-found: error
+          retention-days: 30
 
   sast:
     name: Static application security testing
@@ -304,14 +449,15 @@ jobs:
             exit 1
           }
 
-      - name: Install Semgrep
+      - name: Install Semgrep and YAML support
         shell: bash
         run: |
           set -euo pipefail
 
           python3 -m pip install \
             --disable-pip-version-check \
-            semgrep
+            semgrep \
+            pyyaml
 
           semgrep --version
 
@@ -341,7 +487,62 @@ jobs:
             exit 1
           }
 
-      - name: Validate Semgrep JSON report
+      - name: Convert Semgrep JSON to YAML
+        env:
+          TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
+          TARGET_SHA: ${{ needs.validate.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          import yaml
+
+          source = Path("reports/semgrep.json")
+          output = Path("reports/semgrep.yaml")
+
+          semgrep = json.loads(
+              source.read_text(encoding="utf-8")
+          )
+
+          document = {
+              "scan": {
+                  "type": "sast",
+                  "tool": "semgrep",
+                  "repository": os.getenv(
+                      "TARGET_REPOSITORY",
+                      "",
+                  ),
+                  "sha": os.getenv(
+                      "TARGET_SHA",
+                      "",
+                  ),
+                  "generated_at": datetime.now(
+                      timezone.utc
+                  ).isoformat(),
+              },
+              "report": semgrep,
+          }
+
+          output.write_text(
+              yaml.safe_dump(
+                  document,
+                  sort_keys=False,
+                  allow_unicode=True,
+                  default_flow_style=False,
+              ),
+              encoding="utf-8",
+          )
+
+          print(f"Generated {output}")
+          PY
+
+      - name: Validate and summarize Semgrep findings
         shell: bash
         run: |
           set -euo pipefail
@@ -351,16 +552,23 @@ jobs:
           from collections import Counter
           from pathlib import Path
 
-          path = Path("reports/semgrep.json")
-          report = json.loads(path.read_text(encoding="utf-8"))
+          report = json.loads(
+              Path("reports/semgrep.json").read_text(
+                  encoding="utf-8"
+              )
+          )
 
           if not isinstance(report, dict):
-              raise SystemExit("Semgrep report must contain a JSON object")
+              raise SystemExit(
+                  "Semgrep report must be a JSON object"
+              )
 
           findings = report.get("results", [])
 
           if not isinstance(findings, list):
-              raise SystemExit("Semgrep results must be an array")
+              raise SystemExit(
+                  "Semgrep results must be an array"
+              )
 
           counts = Counter()
 
@@ -379,25 +587,118 @@ jobs:
 
               counts[severity] += 1
 
-          print(f"Total findings: {len(findings)}")
-          print(f"ERROR: {counts.get('ERROR', 0)}")
-          print(f"WARNING: {counts.get('WARNING', 0)}")
-          print(f"INFO: {counts.get('INFO', 0)}")
+          lines = [
+              "# SAST Summary",
+              "",
+              f"- Total findings: {len(findings)}",
+              f"- ERROR: {counts.get('ERROR', 0)}",
+              f"- WARNING: {counts.get('WARNING', 0)}",
+              f"- INFO: {counts.get('INFO', 0)}",
+              "",
+          ]
+
+          Path(
+              "reports/sast-summary.md"
+          ).write_text(
+              "\n".join(lines),
+              encoding="utf-8",
+          )
+
+          print("\n".join(lines))
           PY
 
       - name: Map findings to OWASP standards
-        if: ${{ hashFiles('reports/semgrep.json') != '' }}
         env:
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
           TARGET_SHA: ${{ needs.validate.outputs.sha }}
+        shell: bash
         run: |
+          set -euo pipefail
+
           if [[ -f scripts/map-findings.py ]]; then
             python3 scripts/map-findings.py \
               reports/semgrep.json \
               reports
           else
-            echo "::warning::scripts/map-findings.py not found; mapping skipped"
+            echo "::warning::scripts/map-findings.py is missing"
           fi
+
+      - name: Convert normalized SAST JSON to YAML
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -s reports/sast-normalized.json ]]; then
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          import yaml
+
+          source = Path(
+              "reports/sast-normalized.json"
+          )
+
+          output = Path(
+              "reports/sast-normalized.yaml"
+          )
+
+          data = json.loads(
+              source.read_text(encoding="utf-8")
+          )
+
+          output.write_text(
+              yaml.safe_dump(
+                  data,
+                  sort_keys=False,
+                  allow_unicode=True,
+                  default_flow_style=False,
+              ),
+              encoding="utf-8",
+          )
+
+          print(f"Generated {output}")
+          PY
+          else
+            echo "::warning::sast-normalized.json was not generated"
+          fi
+
+      - name: Generate Edge-compatible SAST HTML report
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -f scripts/generate-html-report.py ]]; then
+            python3 scripts/generate-html-report.py \
+              reports/semgrep.json \
+              reports/sast-report.html
+          else
+            echo "::error::scripts/generate-html-report.py is missing"
+            exit 1
+          fi
+
+          test -s reports/sast-report.html || {
+            echo "::error::SAST HTML report was not generated"
+            exit 1
+          }
+
+      - name: Validate SAST output files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s reports/semgrep.json
+          test -s reports/semgrep.yaml
+          test -s reports/sast-summary.md
+          test -s reports/sast-report.html
+
+          echo "SAST report files:"
+
+          find reports \
+            -maxdepth 2 \
+            -type f \
+            -print |
+            sort
 
       - name: Upload SAST reports
         if: ${{ always() }}
@@ -432,6 +733,15 @@ jobs:
       - name: Checkout security workflow repository
         uses: actions/checkout@v4
 
+      - name: Install YAML support
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 -m pip install \
+            --disable-pip-version-check \
+            pyyaml
+
       - name: Select DAST target
         id: target
         shell: bash
@@ -441,11 +751,11 @@ jobs:
           if [[ -n "$EXTERNAL_TARGET_URL" ]]; then
             echo "type=external" >> "$GITHUB_OUTPUT"
             echo "url=$EXTERNAL_TARGET_URL" >> "$GITHUB_OUTPUT"
-            echo "Using authorized external DAST target"
+            echo "Using authorized external target"
           else
             echo "type=local-demo" >> "$GITHUB_OUTPUT"
             echo "url=$LOCAL_TARGET_URL" >> "$GITHUB_OUTPUT"
-            echo "Using isolated local OWASP Juice Shop target"
+            echo "Using isolated local OWASP Juice Shop"
           fi
 
       - name: Validate external target
@@ -457,10 +767,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -x scripts/validate-target.sh ]]; then
+          if [[ -f scripts/validate-target.sh ]]; then
             bash scripts/validate-target.sh
           else
-            echo "::error::scripts/validate-target.sh is required for external targets"
+            echo "::error::validate-target.sh is required for external targets"
             exit 1
           fi
 
@@ -517,30 +827,11 @@ jobs:
 
           echo "::error::DAST target did not become ready"
 
-          if docker container inspect \
-            "$JUICE_SHOP_CONTAINER" >/dev/null 2>&1
-          then
-            docker logs "$JUICE_SHOP_CONTAINER" || true
-          fi
+          docker logs \
+            "$JUICE_SHOP_CONTAINER" \
+            2>/dev/null || true
 
           exit 1
-
-      - name: Display DAST configuration
-        env:
-          TARGET_URL: ${{ steps.target.outputs.url }}
-          TARGET_TYPE: ${{ steps.target.outputs.type }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Target type: $TARGET_TYPE"
-          echo "Target URL: $TARGET_URL"
-          echo "DAST mode: $DAST_MODE"
-
-          if [[ "$DAST_MODE" == "api" && -z "$OPENAPI_URL" ]]; then
-            echo "::error::OPENAPI_URL is required when DAST_MODE=api"
-            exit 1
-          fi
 
       - name: Run OWASP ZAP
         env:
@@ -550,16 +841,16 @@ jobs:
           set -euo pipefail
 
           mkdir -p reports
+
           bash scripts/run-zap.sh reports
 
-      - name: Validate ZAP report
+      - name: Validate ZAP JSON report
         shell: bash
         run: |
           set -euo pipefail
 
           test -s reports/zap.json || {
-            echo "::error::OWASP ZAP did not produce reports/zap.json"
-            find reports -maxdepth 3 -type f -print 2>/dev/null || true
+            echo "::error::ZAP did not generate reports/zap.json"
             exit 1
           }
 
@@ -567,16 +858,23 @@ jobs:
           import json
           from pathlib import Path
 
-          path = Path("reports/zap.json")
-          report = json.loads(path.read_text(encoding="utf-8"))
+          report = json.loads(
+              Path("reports/zap.json").read_text(
+                  encoding="utf-8"
+              )
+          )
 
           if not isinstance(report, dict):
-              raise SystemExit("ZAP report must contain a JSON object")
+              raise SystemExit(
+                  "ZAP report must be a JSON object"
+              )
 
           sites = report.get("site", [])
 
           if not isinstance(sites, list):
-              raise SystemExit("ZAP site property must be an array")
+              raise SystemExit(
+                  "ZAP site property must be an array"
+              )
 
           alert_count = 0
 
@@ -593,8 +891,77 @@ jobs:
           print(f"Alerts: {alert_count}")
           PY
 
+      - name: Convert ZAP JSON to YAML
+        env:
+          TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
+          TARGET_SHA: ${{ needs.validate.outputs.sha }}
+          TARGET_URL: ${{ steps.target.outputs.url }}
+          TARGET_TYPE: ${{ steps.target.outputs.type }}
+          DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          import yaml
+
+          source = Path("reports/zap.json")
+          output = Path("reports/zap.yaml")
+
+          zap = json.loads(
+              source.read_text(encoding="utf-8")
+          )
+
+          document = {
+              "scan": {
+                  "type": "dast",
+                  "tool": "owasp-zap",
+                  "repository": os.getenv(
+                      "TARGET_REPOSITORY",
+                      "",
+                  ),
+                  "sha": os.getenv(
+                      "TARGET_SHA",
+                      "",
+                  ),
+                  "mode": os.getenv(
+                      "DAST_MODE",
+                      "",
+                  ),
+                  "target_type": os.getenv(
+                      "TARGET_TYPE",
+                      "",
+                  ),
+                  "target_url": os.getenv(
+                      "TARGET_URL",
+                      "",
+                  ),
+                  "generated_at": datetime.now(
+                      timezone.utc
+                  ).isoformat(),
+              },
+              "report": zap,
+          }
+
+          output.write_text(
+              yaml.safe_dump(
+                  document,
+                  sort_keys=False,
+                  allow_unicode=True,
+                  default_flow_style=False,
+              ),
+              encoding="utf-8",
+          )
+
+          print(f"Generated {output}")
+          PY
+
       - name: Map ZAP findings to WSTG and ASVS
-        if: ${{ hashFiles('reports/zap.json') != '' }}
         env:
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
           TARGET_SHA: ${{ needs.validate.outputs.sha }}
@@ -607,8 +974,159 @@ jobs:
               reports/zap.json \
               reports
           else
-            echo "::warning::scripts/map-zap.py not found; mapping skipped"
+            echo "::warning::scripts/map-zap.py is missing"
           fi
+
+      - name: Convert normalized DAST JSON to YAML
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          normalized_file=""
+
+          for candidate in \
+            reports/dast-normalized.json \
+            reports/zap-normalized.json
+          do
+            if [[ -s "$candidate" ]]; then
+              normalized_file="$candidate"
+              break
+            fi
+          done
+
+          if [[ -n "$normalized_file" ]]; then
+            NORMALIZED_FILE="$normalized_file" \
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          import yaml
+
+          source = Path(os.environ["NORMALIZED_FILE"])
+          output = source.with_suffix(".yaml")
+
+          data = json.loads(
+              source.read_text(encoding="utf-8")
+          )
+
+          output.write_text(
+              yaml.safe_dump(
+                  data,
+                  sort_keys=False,
+                  allow_unicode=True,
+                  default_flow_style=False,
+              ),
+              encoding="utf-8",
+          )
+
+          print(f"Generated {output}")
+          PY
+          else
+            echo "No normalized DAST JSON file was produced"
+          fi
+
+      - name: Generate DAST YAML summary
+        env:
+          TARGET_URL: ${{ steps.target.outputs.url }}
+          TARGET_TYPE: ${{ steps.target.outputs.type }}
+          DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          from collections import Counter
+          from pathlib import Path
+
+          import yaml
+
+          report = json.loads(
+              Path("reports/zap.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          counts = Counter()
+          alert_count = 0
+
+          sites = report.get("site", [])
+
+          if not isinstance(sites, list):
+              sites = []
+
+          for site in sites:
+              if not isinstance(site, dict):
+                  continue
+
+              alerts = site.get("alerts", [])
+
+              if not isinstance(alerts, list):
+                  continue
+
+              for alert in alerts:
+                  if not isinstance(alert, dict):
+                      continue
+
+                  alert_count += 1
+
+                  risk = str(
+                      alert.get("riskdesc")
+                      or alert.get("risk")
+                      or alert.get("riskcode")
+                      or ""
+                  ).strip().upper()
+
+                  if "HIGH" in risk or risk == "3":
+                      counts["high"] += 1
+                  elif "MEDIUM" in risk or risk == "2":
+                      counts["medium"] += 1
+                  elif "LOW" in risk or risk == "1":
+                      counts["low"] += 1
+                  else:
+                      counts["informational"] += 1
+
+          summary = {
+              "dast_summary": {
+                  "tool": "owasp-zap",
+                  "mode": os.getenv(
+                      "DAST_MODE",
+                      "",
+                  ),
+                  "target_type": os.getenv(
+                      "TARGET_TYPE",
+                      "",
+                  ),
+                  "target_url": os.getenv(
+                      "TARGET_URL",
+                      "",
+                  ),
+                  "sites": len(sites),
+                  "alerts": alert_count,
+                  "risk": {
+                      "high": counts["high"],
+                      "medium": counts["medium"],
+                      "low": counts["low"],
+                      "informational": (
+                          counts["informational"]
+                      ),
+                  },
+              }
+          }
+
+          Path(
+              "reports/dast-summary.yaml"
+          ).write_text(
+              yaml.safe_dump(
+                  summary,
+                  sort_keys=False,
+                  allow_unicode=True,
+              ),
+              encoding="utf-8",
+          )
+          PY
 
       - name: Capture local target logs
         if: >-
@@ -648,6 +1166,17 @@ jobs:
 
           exit 0
 
+      - name: List DAST report files
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          find reports \
+            -maxdepth 3 \
+            -type f \
+            -print \
+            2>/dev/null |
+            sort || true
+
       - name: Upload DAST reports
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -670,7 +1199,68 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Report DAST execution status
+      - name: Create DAST status YAML
+        env:
+          DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
+          DAST_RESULT: ${{ needs.dast.result }}
+          SAST_RESULT: ${{ needs.sast.result }}
+          TARGET_URL: ${{ needs.validate.outputs.target_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p status-reports
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          target_url = os.getenv("TARGET_URL", "")
+
+          def quote(value):
+              text = str(value or "")
+              return (
+                  '"'
+                  + text.replace("\\", "\\\\")
+                  .replace('"', '\\"')
+                  .replace("\r", "\\r")
+                  .replace("\n", "\\n")
+                  + '"'
+              )
+
+          lines = [
+              "dast_status:",
+              (
+                  "  mode: "
+                  + quote(os.getenv("DAST_MODE"))
+              ),
+              (
+                  "  result: "
+                  + quote(os.getenv("DAST_RESULT"))
+              ),
+              (
+                  "  sast_result: "
+                  + quote(os.getenv("SAST_RESULT"))
+              ),
+              (
+                  "  target_type: "
+                  + quote(
+                      "external"
+                      if target_url
+                      else "local-demo"
+                  )
+              ),
+          ]
+
+          Path(
+              "status-reports/dast-status.yaml"
+          ).write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Write DAST job summary
         env:
           DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
           DAST_RESULT: ${{ needs.dast.result }}
@@ -686,10 +1276,6 @@ jobs:
             target_type=external
           fi
 
-          echo "DAST mode: $DAST_MODE"
-          echo "DAST result: $DAST_RESULT"
-          echo "DAST target type: $target_type"
-
           {
             echo "## DAST status"
             echo
@@ -701,17 +1287,24 @@ jobs:
           if [[ "$DAST_MODE" == "none" ]]; then
             echo "DAST was intentionally disabled"
           elif [[ "$SAST_RESULT" != "success" ]]; then
-            echo "::warning::DAST did not run because SAST did not succeed"
+            echo "::warning::DAST did not run because SAST failed"
           elif [[ "$DAST_RESULT" == "skipped" ]]; then
             echo "::warning::DAST was unexpectedly skipped"
-          else
-            echo "DAST completed with result: $DAST_RESULT"
           fi
 
+      - name: Upload DAST status report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-status-${{ needs.validate.outputs.sha }}
+          path: status-reports/
+          if-no-files-found: error
+          retention-days: 30
+
   summary:
-    name: Build OWASP penetration-test summary
+    name: Build consolidated OWASP reports
     needs:
       - validate
+      - app-prep
       - sast
       - dast
       - dast-status
@@ -729,8 +1322,22 @@ jobs:
       - name: Checkout security workflow repository
         uses: actions/checkout@v4
 
-      - name: Create report directory
+      - name: Create consolidated report directory
         run: mkdir -p reports
+
+      - name: Download validation reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: validation-reports-${{ needs.validate.outputs.sha }}
+          path: reports/validation
+
+      - name: Download preparation reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: preparation-reports-${{ needs.validate.outputs.sha }}
+          path: reports/preparation
 
       - name: Download SAST reports
         if: >-
@@ -742,7 +1349,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: sast-reports-${{ needs.validate.outputs.sha }}
-          path: reports
+          path: reports/sast
 
       - name: Download DAST reports
         if: >-
@@ -754,13 +1361,61 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: dast-reports-${{ needs.validate.outputs.sha }}
-          path: reports
+          path: reports/dast
 
-      - name: Build YAML summary
+      - name: Download DAST status
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dast-status-${{ needs.validate.outputs.sha }}
+          path: reports/status
+
+      - name: Copy primary reports to root
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for file in \
+            semgrep.json \
+            semgrep.yaml \
+            sast-normalized.json \
+            sast-normalized.yaml \
+            sast-summary.md \
+            sast-report.html
+          do
+            if [[ -s "reports/sast/$file" ]]; then
+              cp "reports/sast/$file" "reports/$file"
+            fi
+          done
+
+          for file in \
+            zap.json \
+            zap.yaml \
+            zap.md \
+            zap.html \
+            dast-summary.yaml \
+            dast-normalized.json \
+            dast-normalized.yaml \
+            zap-normalized.json \
+            zap-normalized.yaml
+          do
+            if [[ -s "reports/dast/$file" ]]; then
+              cp "reports/dast/$file" "reports/$file"
+            fi
+          done
+
+      - name: Install YAML support
+        shell: bash
+        run: |
+          python3 -m pip install \
+            --disable-pip-version-check \
+            pyyaml
+
+      - name: Build consolidated JSON and YAML summaries
         env:
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
           TARGET_SHA: ${{ needs.validate.outputs.sha }}
-          APP_TYPE: ${{ needs.validate.outputs.app_type }}
+          APP_TYPE: ${{ needs.app-prep.outputs.detected_app_type || needs.validate.outputs.app_type }}
           DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
           SAST_RESULT: ${{ needs.sast.result }}
           DAST_RESULT: ${{ needs.dast.result }}
@@ -772,7 +1427,10 @@ jobs:
           import json
           import os
           from collections import Counter
+          from datetime import datetime, timezone
           from pathlib import Path
+
+          import yaml
 
           root = Path("reports")
           root.mkdir(parents=True, exist_ok=True)
@@ -784,25 +1442,13 @@ jobs:
                   return {}
 
               try:
-                  value = json.loads(
+                  data = json.loads(
                       path.read_text(encoding="utf-8")
                   )
               except (OSError, json.JSONDecodeError):
                   return {}
 
-              return value if isinstance(value, dict) else {}
-
-          def quote(value):
-              text = str(value or "")
-
-              return (
-                  '"'
-                  + text.replace("\\", "\\\\")
-                  .replace('"', '\\"')
-                  .replace("\r", "\\r")
-                  .replace("\n", "\\n")
-                  + '"'
-              )
+              return data if isinstance(data, dict) else {}
 
           semgrep = load_json("semgrep.json")
           zap = load_json("zap.json")
@@ -835,6 +1481,7 @@ jobs:
               sites = []
 
           zap_counts = Counter()
+          alert_count = 0
 
           for site in sites:
               if not isinstance(site, dict):
@@ -849,6 +1496,8 @@ jobs:
                   if not isinstance(alert, dict):
                       continue
 
+                  alert_count += 1
+
                   risk = str(
                       alert.get("riskdesc")
                       or alert.get("risk")
@@ -857,82 +1506,211 @@ jobs:
                   ).strip().upper()
 
                   if "HIGH" in risk or risk == "3":
-                      zap_counts["HIGH"] += 1
+                      zap_counts["high"] += 1
                   elif "MEDIUM" in risk or risk == "2":
-                      zap_counts["MEDIUM"] += 1
+                      zap_counts["medium"] += 1
                   elif "LOW" in risk or risk == "1":
-                      zap_counts["LOW"] += 1
+                      zap_counts["low"] += 1
                   else:
-                      zap_counts["INFORMATIONAL"] += 1
+                      zap_counts["informational"] += 1
 
-          lines = [
-              "assessment:",
-              (
-                  "  repository: "
-                  + quote(os.getenv("TARGET_REPOSITORY"))
-              ),
-              (
-                  "  sha: "
-                  + quote(os.getenv("TARGET_SHA"))
-              ),
-              (
-                  "  app_type: "
-                  + quote(os.getenv("APP_TYPE"))
-              ),
-              (
-                  "  dast_mode: "
-                  + quote(os.getenv("DAST_MODE"))
-              ),
-              "jobs:",
-              (
-                  "  sast: "
-                  + quote(os.getenv("SAST_RESULT"))
-              ),
-              (
-                  "  dast: "
-                  + quote(os.getenv("DAST_RESULT"))
-              ),
-              "sast:",
-              (
-                  "  report_present: "
-                  + str(
-                      (root / "semgrep.json").exists()
-                  ).lower()
-              ),
-              f"  findings: {len(findings)}",
-              f"  error: {sast_counts.get('ERROR', 0)}",
-              f"  warning: {sast_counts.get('WARNING', 0)}",
-              f"  info: {sast_counts.get('INFO', 0)}",
-              "dast:",
-              (
-                  "  report_present: "
-                  + str(
-                      (root / "zap.json").exists()
-                  ).lower()
-              ),
-              f"  sites: {len(sites)}",
-              f"  high: {zap_counts.get('HIGH', 0)}",
-              f"  medium: {zap_counts.get('MEDIUM', 0)}",
-              f"  low: {zap_counts.get('LOW', 0)}",
-              (
-                  "  informational: "
-                  + str(
-                      zap_counts.get("INFORMATIONAL", 0)
-                  )
-              ),
-          ]
+          summary = {
+              "assessment": {
+                  "repository": os.getenv(
+                      "TARGET_REPOSITORY",
+                      "",
+                  ),
+                  "sha": os.getenv(
+                      "TARGET_SHA",
+                      "",
+                  ),
+                  "app_type": os.getenv(
+                      "APP_TYPE",
+                      "",
+                  ),
+                  "dast_mode": os.getenv(
+                      "DAST_MODE",
+                      "",
+                  ),
+                  "generated_at": datetime.now(
+                      timezone.utc
+                  ).isoformat(),
+              },
+              "jobs": {
+                  "sast": os.getenv(
+                      "SAST_RESULT",
+                      "",
+                  ),
+                  "dast": os.getenv(
+                      "DAST_RESULT",
+                      "",
+                  ),
+              },
+              "sast": {
+                  "report_present": bool(semgrep),
+                  "findings": len(findings),
+                  "severity": {
+                      "error": sast_counts["ERROR"],
+                      "warning": sast_counts["WARNING"],
+                      "info": sast_counts["INFO"],
+                  },
+              },
+              "dast": {
+                  "report_present": bool(zap),
+                  "sites": len(sites),
+                  "alerts": alert_count,
+                  "risk": {
+                      "high": zap_counts["high"],
+                      "medium": zap_counts["medium"],
+                      "low": zap_counts["low"],
+                      "informational": (
+                          zap_counts["informational"]
+                      ),
+                  },
+              },
+          }
 
-          output = root / "owasp-pen-test-summary.yaml"
-
-          output.write_text(
-              "\n".join(lines) + "\n",
+          Path(
+              "reports/owasp-pen-test-summary.json"
+          ).write_text(
+              json.dumps(
+                  summary,
+                  indent=2,
+                  ensure_ascii=False,
+              )
+              + "\n",
               encoding="utf-8",
           )
 
-          print(output.read_text(encoding="utf-8"))
+          Path(
+              "reports/owasp-pen-test-summary.yaml"
+          ).write_text(
+              yaml.safe_dump(
+                  summary,
+                  sort_keys=False,
+                  allow_unicode=True,
+                  default_flow_style=False,
+              ),
+              encoding="utf-8",
+          )
+
+          print(
+              Path(
+                  "reports/owasp-pen-test-summary.yaml"
+              ).read_text(encoding="utf-8")
+          )
           PY
 
-      - name: Upload consolidated reports
+      - name: Generate report manifest YAML
+        env:
+          TARGET_SHA: ${{ needs.validate.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          import yaml
+
+          root = Path("reports")
+
+          files = []
+
+          for path in sorted(root.rglob("*")):
+              if not path.is_file():
+                  continue
+
+              files.append(
+                  {
+                      "path": str(
+                          path.relative_to(root)
+                      ),
+                      "size_bytes": path.stat().st_size,
+                      "format": (
+                          path.suffix.lstrip(".").lower()
+                          or "unknown"
+                      ),
+                  }
+              )
+
+          manifest = {
+              "artifact": {
+                  "name": (
+                      "owasp-pen-test-"
+                      + os.getenv("TARGET_SHA", "")
+                  ),
+                  "files": files,
+              }
+          }
+
+          Path(
+              "reports/report-manifest.yaml"
+          ).write_text(
+              yaml.safe_dump(
+                  manifest,
+                  sort_keys=False,
+                  allow_unicode=True,
+              ),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Validate consolidated reports
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s reports/semgrep.json || {
+            echo "::error::semgrep.json is missing"
+            exit 1
+          }
+
+          test -s reports/semgrep.yaml || {
+            echo "::error::semgrep.yaml is missing"
+            exit 1
+          }
+
+          test -s reports/sast-report.html || {
+            echo "::error::sast-report.html is missing"
+            exit 1
+          }
+
+          test -s reports/owasp-pen-test-summary.json || {
+            echo "::error::Consolidated JSON summary is missing"
+            exit 1
+          }
+
+          test -s reports/owasp-pen-test-summary.yaml || {
+            echo "::error::Consolidated YAML summary is missing"
+            exit 1
+          }
+
+          if [[ "${{ needs.validate.outputs.dast_mode }}" != "none" ]]; then
+            test -s reports/zap.json || {
+              echo "::error::zap.json is missing"
+              exit 1
+            }
+
+            test -s reports/zap.yaml || {
+              echo "::error::zap.yaml is missing"
+              exit 1
+            }
+          fi
+
+      - name: Display consolidated report files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find reports \
+            -maxdepth 5 \
+            -type f \
+            -print |
+            sort
+
+      - name: Upload consolidated OWASP reports
         uses: actions/upload-artifact@v4
         with:
           name: owasp-pen-test-${{ needs.validate.outputs.sha }}
@@ -967,22 +1745,7 @@ jobs:
           name: owasp-pen-test-${{ needs.validate.outputs.sha }}
           path: all-reports
 
-      - name: Display reports
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          find all-reports \
-            -maxdepth 4 \
-            -type f \
-            -print |
-            sort
-
-          echo
-          echo "OWASP summary:"
-          cat all-reports/owasp-pen-test-summary.yaml
-
-      - name: Require successful scanners
+      - name: Validate scanner execution
         env:
           SAST_RESULT: ${{ needs.sast.result }}
           DAST_RESULT: ${{ needs.dast.result }}
@@ -1001,8 +1764,110 @@ jobs:
             exit 1
           fi
 
+      - name: Validate required policy reports
+        env:
+          DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s all-reports/semgrep.json || {
+            echo "::error::Mandatory Semgrep JSON report is missing"
+            exit 1
+          }
+
+          test -s all-reports/semgrep.yaml || {
+            echo "::error::Mandatory Semgrep YAML report is missing"
+            exit 1
+          }
+
+          if [[ "$DAST_MODE" != "none" ]]; then
+            test -s all-reports/zap.json || {
+              echo "::error::Mandatory ZAP JSON report is missing"
+              exit 1
+            }
+
+            test -s all-reports/zap.yaml || {
+              echo "::error::Mandatory ZAP YAML report is missing"
+              exit 1
+            }
+          fi
+
+      - name: Display final report inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find all-reports \
+            -maxdepth 5 \
+            -type f \
+            -print |
+            sort
+
+          echo
+          echo "Consolidated YAML summary:"
+          cat all-reports/owasp-pen-test-summary.yaml
+
       - name: Apply OWASP policy gate
         env:
           FAIL_ON_SAST: ${{ vars.FAIL_ON_SAST || 'ERROR' }}
           FAIL_ON_ZAP_RISK: ${{ vars.FAIL_ON_ZAP_RISK || 'NONE' }}
         run: python3 scripts/security-gate.py all-reports
+
+      - name: Create policy-gate YAML result
+        if: ${{ always() }}
+        env:
+          FAIL_ON_SAST: ${{ vars.FAIL_ON_SAST || 'ERROR' }}
+          FAIL_ON_ZAP_RISK: ${{ vars.FAIL_ON_ZAP_RISK || 'NONE' }}
+          GATE_OUTCOME: ${{ job.status }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          def quote(value):
+              text = str(value or "")
+              return (
+                  '"'
+                  + text.replace("\\", "\\\\")
+                  .replace('"', '\\"')
+                  .replace("\r", "\\r")
+                  .replace("\n", "\\n")
+                  + '"'
+              )
+
+          lines = [
+              "policy_gate:",
+              (
+                  "  sast_threshold: "
+                  + quote(os.getenv("FAIL_ON_SAST"))
+              ),
+              (
+                  "  zap_threshold: "
+                  + quote(os.getenv("FAIL_ON_ZAP_RISK"))
+              ),
+              (
+                  "  status: "
+                  + quote(os.getenv("GATE_OUTCOME"))
+              ),
+          ]
+
+          Path(
+              "all-reports/policy-gate-result.yaml"
+          ).write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload policy-gate result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: policy-gate-${{ needs.validate.outputs.sha }}
+          path: all-reports/policy-gate-result.yaml
+          if-no-files-found: warn
+          retention-days: 30
