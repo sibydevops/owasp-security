@@ -11,8 +11,8 @@ on:
 permissions:
   contents: read
 jobs:
-  scan:
-    uses: ./.github/workflows/central-security.yml
+  security:
+    uses: sibydevops/owasp-security/.github/workflows/reusable-security.yml@main
     with:
       target_repository: ${{ github.repository }}
       target_sha: ${{ github.sha }}

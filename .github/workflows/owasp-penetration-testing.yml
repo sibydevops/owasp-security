@@ -40,6 +40,40 @@ on:
         options: [baseline, full, api, none]
   repository_dispatch:
     types: [owasp-pen-test]
+  workflow_call:
+    inputs:
+      target_repository:
+        description: owner/repository to test
+        required: true
+        type: string
+      target_sha:
+        description: Exact commit SHA to assess
+        required: true
+        type: string
+      app_type:
+        description: auto, web, api, cloud-native, desktop, library
+        required: false
+        default: auto
+        type: string
+      target_url:
+        description: Authorized non-production target URL for ZAP
+        required: false
+        default: ''
+        type: string
+      openapi_url:
+        description: OpenAPI document URL for API testing
+        required: false
+        default: ''
+        type: string
+      dast_mode:
+        description: baseline, full, api, or none
+        required: false
+        default: baseline
+        type: string
+    secrets:
+      SECURITY_REPO_TOKEN:
+        description: Token used only to clone an authorized private target
+        required: false
 
 concurrency:
   group: >-
@@ -71,16 +105,16 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           WD_REPOSITORY: ${{ inputs.target_repository || github.repository }}
           WD_SHA: ${{ inputs.target_sha || github.sha }}
-          WD_APP_TYPE: ${{ inputs.app_type || 'auto' }}
-          WD_TARGET_URL: ${{ inputs.target_url }}
-          WD_OPENAPI_URL: ${{ inputs.openapi_url }}
-          WD_DAST_MODE: ${{ inputs.dast_mode || 'baseline' }}
+          WD_APP_TYPE: ${{ inputs.app_type || vars.DEFAULT_APP_TYPE || 'auto' }}
+          WD_TARGET_URL: ${{ inputs.target_url || vars.DAST_TARGET_URL }}
+          WD_OPENAPI_URL: ${{ inputs.openapi_url || vars.DAST_OPENAPI_URL }}
+          WD_DAST_MODE: ${{ inputs.dast_mode || vars.DEFAULT_DAST_MODE || 'baseline' }}
           RD_REPOSITORY: ${{ github.event.client_payload.target_repository || github.repository }}
           RD_SHA: ${{ github.event.client_payload.target_sha || github.sha }}
-          RD_APP_TYPE: ${{ github.event.client_payload.app_type || 'auto' }}
-          RD_TARGET_URL: ${{ github.event.client_payload.target_url }}
-          RD_OPENAPI_URL: ${{ github.event.client_payload.openapi_url }}
-          RD_DAST_MODE: ${{ github.event.client_payload.dast_mode || 'baseline' }}
+          RD_APP_TYPE: ${{ github.event.client_payload.app_type || vars.DEFAULT_APP_TYPE || 'auto' }}
+          RD_TARGET_URL: ${{ github.event.client_payload.target_url || vars.DAST_TARGET_URL }}
+          RD_OPENAPI_URL: ${{ github.event.client_payload.openapi_url || vars.DAST_OPENAPI_URL }}
+          RD_DAST_MODE: ${{ github.event.client_payload.dast_mode || vars.DEFAULT_DAST_MODE || 'baseline' }}
         run: bash ./scripts/normalize-inputs.sh
 
   app-prep:
@@ -169,22 +203,98 @@ jobs:
   dast:
     name: Dynamic application security testing
     needs: [validate, app-prep, sast]
-    if: ${{ needs.validate.outputs.dast_mode != 'none' && needs.validate.outputs.target_url != '' }}
+    if: >-
+      ${{
+        needs.validate.result == 'success' &&
+        needs.app-prep.result == 'success' &&
+        needs.sast.result == 'success' &&
+        needs.validate.outputs.dast_mode != 'none' &&
+        needs.validate.outputs.target_url != ''
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - name: Checkout security workflow repository
         uses: actions/checkout@v4
 
+      - name: Display DAST configuration
+        env:
+          TARGET_URL: ${{ needs.validate.outputs.target_url }}
+          OPENAPI_URL: ${{ needs.validate.outputs.openapi_url }}
+          DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "DAST mode: $DAST_MODE"
+          echo "Target URL configured: $([[ -n "$TARGET_URL" ]] && echo yes || echo no)"
+          echo "OpenAPI URL configured: $([[ -n "$OPENAPI_URL" ]] && echo yes || echo no)"
+          [[ -n "$TARGET_URL" ]] || {
+            echo "::error::TARGET_URL is empty"
+            exit 1
+          }
+          if [[ "$DAST_MODE" == "api" && -z "$OPENAPI_URL" ]]; then
+            echo "::error::OPENAPI_URL is required when DAST_MODE=api"
+            exit 1
+          fi
+
+      - name: Validate DAST target safety
+        env:
+          TARGET_URL: ${{ needs.validate.outputs.target_url }}
+          ALLOWED_TARGET_SUFFIXES: ${{ vars.ALLOWED_TARGET_SUFFIXES }}
+        run: bash ./scripts/validate-target.sh
+
+      - name: Check target availability
+        env:
+          TARGET_URL: ${{ needs.validate.outputs.target_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..12}; do
+            status="$(curl --silent --show-error --location --output /dev/null \
+              --write-out '%{http_code}' --connect-timeout 10 --max-time 30 \
+              "$TARGET_URL" || true)"
+            echo "Target availability attempt $attempt: HTTP ${status:-unreachable}"
+            if [[ "$status" =~ ^[1-5][0-9][0-9]$ ]]; then
+              echo "Target is reachable"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::DAST target is not reachable from the GitHub-hosted runner"
+          exit 1
+
       - name: Run OWASP ZAP DAST
         env:
           TARGET_URL: ${{ needs.validate.outputs.target_url }}
           OPENAPI_URL: ${{ needs.validate.outputs.openapi_url }}
           DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
-        run: bash ./scripts/run-zap.sh reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          bash ./scripts/run-zap.sh reports
+
+      - name: Validate ZAP report
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s reports/zap.json || {
+            echo "::error::OWASP ZAP did not produce reports/zap.json"
+            find reports -maxdepth 3 -type f -print 2>/dev/null || true
+            exit 1
+          }
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("reports/zap.json")
+          report = json.loads(path.read_text(encoding="utf-8"))
+          if not isinstance(report, dict):
+              raise SystemExit("zap.json must contain a JSON object")
+          print("ZAP JSON report is valid")
+          print(f"Sites in report: {len(report.get('site', []))}")
+          PY
 
       - name: Map ZAP findings to WSTG and ASVS
-        if: ${{ success() && hashFiles('reports/zap.json') != '' }}
         env:
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
           TARGET_SHA: ${{ needs.validate.outputs.sha }}
@@ -199,9 +309,58 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  dast-status:
+    name: Explain DAST status
+    needs: [validate, app-prep, sast, dast]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report DAST execution decision
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          APP_PREP_RESULT: ${{ needs.app-prep.result }}
+          SAST_RESULT: ${{ needs.sast.result }}
+          DAST_RESULT: ${{ needs.dast.result }}
+          DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
+          TARGET_URL: ${{ needs.validate.outputs.target_url }}
+          OPENAPI_URL: ${{ needs.validate.outputs.openapi_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_configured=no
+          openapi_configured=no
+          [[ -n "$TARGET_URL" ]] && target_configured=yes
+          [[ -n "$OPENAPI_URL" ]] && openapi_configured=yes
+          echo "Event: $EVENT_NAME"
+          echo "Application preparation: $APP_PREP_RESULT"
+          echo "SAST result: $SAST_RESULT"
+          echo "DAST result: $DAST_RESULT"
+          echo "DAST mode: ${DAST_MODE:-<empty>}"
+          echo "Target URL configured: $target_configured"
+          echo "OpenAPI URL configured: $openapi_configured"
+          {
+            echo "## DAST execution status"
+            echo
+            echo "- Event: \`$EVENT_NAME\`"
+            echo "- Result: \`$DAST_RESULT\`"
+            echo "- Mode: \`${DAST_MODE:-empty}\`"
+            echo "- Target URL configured: $target_configured"
+            echo "- OpenAPI URL configured: $openapi_configured"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$DAST_MODE" == "none" ]]; then
+            echo "DAST was intentionally disabled because dast_mode=none"
+          elif [[ -z "$TARGET_URL" ]]; then
+            echo "::warning::DAST was skipped because target_url is empty. Set DAST_TARGET_URL or provide target_url."
+          elif [[ "$APP_PREP_RESULT" != "success" || "$SAST_RESULT" != "success" ]]; then
+            echo "::warning::DAST was skipped because an upstream required job did not succeed."
+          elif [[ "$DAST_RESULT" == "skipped" ]]; then
+            echo "::warning::DAST was skipped because its job condition was not satisfied."
+          fi
+
   pen-test-summary:
     name: Build OWASP penetration-test summary
-    needs: [validate, app-prep, sast, dast]
+    needs: [validate, app-prep, sast, dast, dast-status]
     if: ${{ always() && needs.validate.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -351,8 +510,14 @@ jobs:
             }
           fi
 
+      - name: List consolidated reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          find all-reports -maxdepth 4 -type f -print | sort
+
       - name: Apply OWASP policy gate
         env:
           FAIL_ON_SAST: ${{ vars.FAIL_ON_SAST || 'ERROR' }}
-          FAIL_ON_ZAP_RISK: ${{ vars.FAIL_ON_ZAP_RISK || 'High' }}
+          FAIL_ON_ZAP_RISK: ${{ vars.FAIL_ON_ZAP_RISK || 'HIGH' }}
         run: python3 scripts/security-gate.py all-reports
