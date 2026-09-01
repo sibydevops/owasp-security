@@ -1,5 +1,7 @@
 name: OWASP Penetration Testing
-run-name: OWASP Pen Test ${{ inputs.target_repository || github.event.client_payload.target_repository || github.repository }}@${{ inputs.target_sha || github.event.client_payload.target_sha || github.sha }}
+
+run-name: >-
+  OWASP Pen Test ${{ inputs.target_repository || github.event.client_payload.target_repository || github.repository }}@${{ inputs.target_sha || github.event.client_payload.target_sha || github.sha }}
 
 on:
   push:
@@ -40,7 +42,8 @@ on:
     types: [owasp-pen-test]
 
 concurrency:
-  group: owasp-pen-test-${{ inputs.target_repository || github.event.client_payload.target_repository || github.repository }}-${{ inputs.target_sha || github.event.client_payload.target_sha || github.sha }}
+  group: >-
+    owasp-pen-test-${{ inputs.target_repository || github.event.client_payload.target_repository || github.repository }}-${{ inputs.target_sha || github.event.client_payload.target_sha || github.sha }}
   cancel-in-progress: true
 
 permissions:
@@ -48,7 +51,9 @@ permissions:
 
 jobs:
   validate:
+    name: Validate and normalize inputs
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       repository: ${{ steps.input.outputs.repository }}
       sha: ${{ steps.input.outputs.sha }}
@@ -57,162 +62,295 @@ jobs:
       openapi_url: ${{ steps.input.outputs.openapi_url }}
       dast_mode: ${{ steps.input.outputs.dast_mode }}
     steps:
-      - uses: actions/checkout@v4
-      - id: input
+      - name: Checkout security workflow repository
+        uses: actions/checkout@v4
+
+      - name: Normalize inputs
+        id: input
         env:
+          EVENT_NAME: ${{ github.event_name }}
           WD_REPOSITORY: ${{ inputs.target_repository || github.repository }}
           WD_SHA: ${{ inputs.target_sha || github.sha }}
-          WD_APP_TYPE: ${{ inputs.app_type }}
+          WD_APP_TYPE: ${{ inputs.app_type || 'auto' }}
           WD_TARGET_URL: ${{ inputs.target_url }}
           WD_OPENAPI_URL: ${{ inputs.openapi_url }}
-          WD_DAST_MODE: ${{ inputs.dast_mode }}
+          WD_DAST_MODE: ${{ inputs.dast_mode || 'baseline' }}
           RD_REPOSITORY: ${{ github.event.client_payload.target_repository || github.repository }}
           RD_SHA: ${{ github.event.client_payload.target_sha || github.sha }}
-          RD_APP_TYPE: ${{ github.event.client_payload.app_type }}
+          RD_APP_TYPE: ${{ github.event.client_payload.app_type || 'auto' }}
           RD_TARGET_URL: ${{ github.event.client_payload.target_url }}
           RD_OPENAPI_URL: ${{ github.event.client_payload.openapi_url }}
-          RD_DAST_MODE: ${{ github.event.client_payload.dast_mode }}
+          RD_DAST_MODE: ${{ github.event.client_payload.dast_mode || 'baseline' }}
         run: bash ./scripts/normalize-inputs.sh
 
   app-prep:
+    name: Prepare application
     needs: validate
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      detected_app_type: ${{ steps.detect.outputs.app_type }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout security workflow repository
+        uses: actions/checkout@v4
+
       - name: Clone exact target commit
         env:
           GH_TOKEN: ${{ secrets.SECURITY_REPO_TOKEN || github.token }}
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
           TARGET_SHA: ${{ needs.validate.outputs.sha }}
         run: bash ./scripts/clone-target.sh
+
       - name: Detect application type
+        id: detect
         env:
           REQUESTED_APP_TYPE: ${{ needs.validate.outputs.app_type }}
-        run: bash ./scripts/detect-app.sh target | tee detection.env
-      - name: Validate target safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ./scripts/detect-app.sh target | tee detection.env
+          detected="$(sed -n 's/^APP_TYPE=//p' detection.env | tail -n 1)"
+          if [[ -z "$detected" ]]; then
+            detected="${REQUESTED_APP_TYPE:-auto}"
+          fi
+          echo "app_type=$detected" >> "$GITHUB_OUTPUT"
+
+      - name: Validate DAST target safety
         if: ${{ needs.validate.outputs.target_url != '' && needs.validate.outputs.dast_mode != 'none' }}
         env:
           TARGET_URL: ${{ needs.validate.outputs.target_url }}
           ALLOWED_TARGET_SUFFIXES: ${{ vars.ALLOWED_TARGET_SUFFIXES }}
         run: bash ./scripts/validate-target.sh
 
+      - name: Upload prepared target
+        uses: actions/upload-artifact@v4
+        with:
+          name: prepared-target-${{ needs.validate.outputs.sha }}
+          path: |
+            target/
+            detection.env
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 1
+
   sast:
+    name: Static application security testing
     needs: [validate, app-prep]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout security workflow repository
+        uses: actions/checkout@v4
+
+      - name: Download prepared target
+        uses: actions/download-artifact@v4
+        with:
+          name: prepared-target-${{ needs.validate.outputs.sha }}
+          path: .
+
       - name: Run Semgrep CE
         run: bash ./scripts/run-semgrep.sh target reports
+
       - name: Map findings to OWASP standards
         env:
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
           TARGET_SHA: ${{ needs.validate.outputs.sha }}
         run: python3 scripts/map-findings.py reports/semgrep.json reports
 
+      - name: Upload SAST reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-reports-${{ needs.validate.outputs.sha }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 30
+
   dast:
+    name: Dynamic application security testing
     needs: [validate, app-prep, sast]
     if: ${{ needs.validate.outputs.dast_mode != 'none' && needs.validate.outputs.target_url != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout security workflow repository
+        uses: actions/checkout@v4
+
       - name: Run OWASP ZAP DAST
         env:
           TARGET_URL: ${{ needs.validate.outputs.target_url }}
           OPENAPI_URL: ${{ needs.validate.outputs.openapi_url }}
           DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
         run: bash ./scripts/run-zap.sh reports
+
       - name: Map ZAP findings to WSTG and ASVS
+        if: ${{ success() && hashFiles('reports/zap.json') != '' }}
         env:
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
           TARGET_SHA: ${{ needs.validate.outputs.sha }}
         run: python3 scripts/map-zap.py reports/zap.json reports
 
+      - name: Upload DAST reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-reports-${{ needs.validate.outputs.sha }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 30
+
   pen-test-summary:
-    needs: [validate, sast, dast]
-    if: ${{ always() }}
+    name: Build OWASP penetration-test summary
+    needs: [validate, app-prep, sast, dast]
+    if: ${{ always() && needs.validate.result == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout security workflow repository
+        uses: actions/checkout@v4
+
+      - name: Create report directory
+        run: mkdir -p reports
+
+      - name: Download SAST reports
+        if: ${{ needs.sast.result == 'success' || needs.sast.result == 'failure' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: sast-reports-${{ needs.validate.outputs.sha }}
+          path: reports
+
+      - name: Download DAST reports
+        if: ${{ needs.dast.result == 'success' || needs.dast.result == 'failure' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dast-reports-${{ needs.validate.outputs.sha }}
+          path: reports
+
       - name: Build OWASP pen-test summary YAML
         env:
           TARGET_REPOSITORY: ${{ needs.validate.outputs.repository }}
           TARGET_SHA: ${{ needs.validate.outputs.sha }}
           TARGET_URL: ${{ needs.validate.outputs.target_url }}
           DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
-          APP_TYPE: ${{ needs.validate.outputs.app_type }}
+          APP_TYPE: ${{ needs.app-prep.outputs.detected_app_type || needs.validate.outputs.app_type }}
+          APP_PREP_RESULT: ${{ needs.app-prep.result }}
+          SAST_RESULT: ${{ needs.sast.result }}
+          DAST_RESULT: ${{ needs.dast.result }}
+        shell: bash
         run: |
-          mkdir -p reports
+          set -euo pipefail
           python3 - <<'PY'
           import json
+          import os
           from pathlib import Path
 
-          root = Path('reports')
-          summary = {
-              'assessment': {
-                  'repository': '${{ needs.validate.outputs.repository }}',
-                  'sha': '${{ needs.validate.outputs.sha }}',
-                  'app_type': '${{ needs.validate.outputs.app_type }}',
-                  'target_url': '${{ needs.validate.outputs.target_url }}',
-                  'dast_mode': '${{ needs.validate.outputs.dast_mode }}',
-                  'status': 'completed',
-              },
-              'sast': {},
-              'dast': {},
-          }
+          root = Path("reports")
+          root.mkdir(parents=True, exist_ok=True)
 
-          semgrep_path = root / 'semgrep.json'
-          if semgrep_path.exists():
-              with semgrep_path.open('r', encoding='utf-8') as fh:
-                  summary['sast'] = json.load(fh)
+          def load_json(path):
+              if not path.exists():
+                  return {}
+              try:
+                  with path.open("r", encoding="utf-8") as handle:
+                      return json.load(handle)
+              except (OSError, json.JSONDecodeError) as exc:
+                  return {"parse_error": str(exc)}
 
-          zap_path = root / 'zap.json'
-          if zap_path.exists():
-              with zap_path.open('r', encoding='utf-8') as fh:
-                  summary['dast'] = json.load(fh)
+          def yaml_quote(value):
+              text = "" if value is None else str(value)
+              return "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\""
 
-          yaml_text = "assessment:\n"
-          yaml_text += f"  repository: \"{summary['assessment']['repository']}\"\n"
-          yaml_text += f"  sha: \"{summary['assessment']['sha']}\"\n"
-          yaml_text += f"  app_type: \"{summary['assessment']['app_type']}\"\n"
-          yaml_text += f"  target_url: \"{summary['assessment']['target_url']}\"\n"
-          yaml_text += f"  dast_mode: \"{summary['assessment']['dast_mode']}\"\n"
-          yaml_text += f"  status: \"{summary['assessment']['status']}\"\n"
-          yaml_text += "sast:\n"
-          yaml_text += "  findings: " + str(len(summary.get('sast', {}).get('results', []))) + "\n"
-          yaml_text += "dast:\n"
-          yaml_text += "  sites: " + str(len(summary.get('dast', {}).get('site', []))) + "\n"
-          (root / 'owasp-pen-test-summary.yaml').write_text(yaml_text, encoding='utf-8')
+          semgrep = load_json(root / "semgrep.json")
+          zap = load_json(root / "zap.json")
+
+          sast_findings = semgrep.get("results", [])
+          if not isinstance(sast_findings, list):
+              sast_findings = []
+
+          zap_sites = zap.get("site", [])
+          if not isinstance(zap_sites, list):
+              zap_sites = []
+
+          lines = [
+              "assessment:",
+              f"  repository: {yaml_quote(os.getenv('TARGET_REPOSITORY'))}",
+              f"  sha: {yaml_quote(os.getenv('TARGET_SHA'))}",
+              f"  app_type: {yaml_quote(os.getenv('APP_TYPE'))}",
+              f"  target_url: {yaml_quote(os.getenv('TARGET_URL'))}",
+              f"  dast_mode: {yaml_quote(os.getenv('DAST_MODE'))}",
+              "jobs:",
+              f"  app_prep: {yaml_quote(os.getenv('APP_PREP_RESULT'))}",
+              f"  sast: {yaml_quote(os.getenv('SAST_RESULT'))}",
+              f"  dast: {yaml_quote(os.getenv('DAST_RESULT'))}",
+              "sast:",
+              f"  findings: {len(sast_findings)}",
+              f"  report_present: {'true' if (root / 'semgrep.json').exists() else 'false'}",
+              "dast:",
+              f"  sites: {len(zap_sites)}",
+              f"  report_present: {'true' if (root / 'zap.json').exists() else 'false'}",
+          ]
+
+          (root / "owasp-pen-test-summary.yaml").write_text(
+              "\n".join(lines) + "\n", encoding="utf-8"
+          )
           PY
 
-      - name: Upload OWASP pen-test artifacts
+      - name: Upload consolidated OWASP artifacts
         uses: actions/upload-artifact@v4
         with:
           name: owasp-pen-test-${{ needs.validate.outputs.sha }}
           path: |
             reports/
             !reports/*.html
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
 
   gate:
+    name: Apply OWASP security policy gate
     needs: [validate, sast, dast, pen-test-summary]
-    if: ${{ always() && needs.sast.result == 'success' }}
+    if: ${{ always() && needs.pen-test-summary.result == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - name: Checkout security workflow repository
+        uses: actions/checkout@v4
+
+      - name: Download consolidated reports
+        uses: actions/download-artifact@v4
         with:
-          pattern: 'owasp-pen-test-${{ needs.validate.outputs.sha }}'
+          name: owasp-pen-test-${{ needs.validate.outputs.sha }}
           path: all-reports
-          merge-multiple: true
-      - name: Validate YAML artifact exists
+
+      - name: Validate summary artifact exists
         run: |
           test -f all-reports/owasp-pen-test-summary.yaml || {
-            echo "OWASP YAML artifact missing";
-            exit 1;
+            echo "OWASP YAML artifact missing"
+            exit 1
           }
+
+      - name: Fail when required scanning jobs failed
+        env:
+          SAST_RESULT: ${{ needs.sast.result }}
+          DAST_RESULT: ${{ needs.dast.result }}
+          DAST_MODE: ${{ needs.validate.outputs.dast_mode }}
+          TARGET_URL: ${{ needs.validate.outputs.target_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SAST_RESULT" == "success" ]] || {
+            echo "SAST job did not succeed: $SAST_RESULT"
+            exit 1
+          }
+
+          if [[ "$DAST_MODE" != "none" && -n "$TARGET_URL" ]]; then
+            [[ "$DAST_RESULT" == "success" ]] || {
+              echo "DAST was required but did not succeed: $DAST_RESULT"
+              exit 1
+            }
+          fi
+
       - name: Apply OWASP policy gate
         env:
           FAIL_ON_SAST: ${{ vars.FAIL_ON_SAST || 'ERROR' }}
