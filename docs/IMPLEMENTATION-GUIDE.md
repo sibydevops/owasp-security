@@ -97,15 +97,33 @@ Use `dast_mode=api` and `openapi_url` for OpenAPI services. Use `none` for libra
 
 Confirm exact SHA checkout, Semgrep artifact, ZAP artifact, gate behavior, cancellation, and runner cleanup.
 
-## 9. Connect all repository changes
+## 9. Enable DAST (Optional)
+
+⚠️ **Dynamic Application Security Testing (DAST) requires:**
+- Non-production test environment URL
+- Explicit written authorization
+- Network access from runner to target
+- Configuration of target URL and scan mode
+
+For detailed DAST setup, requirements, security considerations, and troubleshooting:
+
+**→ [See DAST-SETUP.md](DAST-SETUP.md)**
+
+Key points:
+- Provide `target_url` parameter to enable DAST
+- Choose scan mode: `baseline` (quick, CI/CD), `full` (comprehensive), `api` (OpenAPI)
+- Only authorized, non-production targets
+- Full scans may impact application (form submissions, data changes)
+
+## 10. Connect all repository changes
 
 Configure the event producer to process push and pull-request events, extract the exact head SHA, enrich the event with catalog metadata, and send `repository_dispatch`. De-duplicate by `repository + SHA`. The central workflow concurrency key prevents duplicate runs for the same commit.
 
-## 10. Branch enforcement
+## 11. Branch enforcement
 
 A status from a workflow running only in the central repository is not automatically a required check in the source repository. To block merges without adding a source-repository workflow, the event producer must use the GitHub Checks API against the source commit. That capability is outside pure GitHub Actions YAML and requires a GitHub App. If merge blocking is mandatory with Actions alone, use the reusable caller workflow in every source repository.
 
-## 11. Application profiles
+## 12. Application profiles
 
 - Web: Semgrep plus ZAP baseline on each eligible change; full active scan only against disposable test targets.
 - API: Semgrep plus ZAP API scan using OpenAPI.
@@ -113,11 +131,11 @@ A status from a workflow running only in the central repository is not automatic
 - Desktop/native: Semgrep applies to supported languages. ZAP applies only to HTTP endpoints exposed by the application.
 - Library/SDK/IaC: SAST only. DAST is not applicable without a running HTTP target.
 
-## 12. OWASP governance
+## 13. OWASP governance
 
 Use WSTG as the human and automated test catalog, ASVS as the application verification requirement baseline, and ZAP/Semgrep as partial automation. Automated ZAP does not cover business logic, role abuse, complex authorization, social engineering, or every WSTG test. Keep periodic manual penetration testing for high-risk applications.
 
-## 13. Complete penetration-testing workflow
+## 14. Complete penetration-testing workflow
 
 Use [OWASP-PENETRATION-TESTING-WORKFLOW.md](OWASP-PENETRATION-TESTING-WORKFLOW.md) for the operational assessment process. It covers written authorization and rules of engagement, scope and safety controls, reconnaissance, threat modeling, WSTG/ASVS/API/MASVS/cloud coverage, automated and manual execution, sanitized evidence, severity, reporting, risk decisions, remediation, retesting, and closure.
 

@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
-src=${1:?source}; out=${2:?output}; mkdir -p "$out"
+src=${1:?source}
+out=${2:?output}
+mkdir -p "$out"
+
+echo "=========================================="
+echo "Semgrep Static Security Analysis (SAST)"
+echo "=========================================="
+echo "Source: $src"
+echo "Output: $out"
+echo ""
 
 # Try to use remote OWASP ruleset first (requires network access to semgrep.dev)
 # If network is unavailable, fall back to local config only
@@ -22,12 +31,23 @@ docker run --rm -v "$PWD/$src:/src:ro" -v "$PWD/$out:/out" semgrep/semgrep:lates
 
 rc=${rc:-0}
 # Semgrep can return nonzero for findings/errors. Preserve report, gate later.
-test -s "$out/semgrep.json" || { echo '{"results":[],"errors":[{"message":"Semgrep produced no report"}]}' > "$out/semgrep.json"; }
+if [ ! -s "$out/semgrep.json" ]; then
+  echo '{"results":[],"errors":[{"message":"Semgrep produced no report"}]}' > "$out/semgrep.json"
+fi
 
-# Convert JSON to YAML format
+echo ""
+echo "Converting Semgrep JSON to YAML..."
 python3 scripts/convert_json_to_yaml.py "$out/semgrep.json" "$out/semgrep.yaml"
 
-# Generate HTML report
-python3 scripts/generate-html-report.py semgrep "$out/semgrep.json" "$out/semgrep.html"
+echo "Generating HTML report..."
+python3 scripts/generate-html-report.py semgrep "$out/semgrep.json" "$out/semgrep.html" || echo "WARNING: HTML report generation failed"
+
+echo ""
+echo "=========================================="
+echo "SAST Reports:"
+echo "  - $out/semgrep.json (raw results)"
+echo "  - $out/semgrep.yaml (structured results)"
+echo "  - $out/semgrep.html (interactive report)"
+echo "=========================================="
 
 exit 0
