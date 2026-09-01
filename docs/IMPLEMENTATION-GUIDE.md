@@ -18,7 +18,40 @@ Use isolated ephemeral self-hosted Linux runners. Apply labels:
 self-hosted, linux, security
 ```
 
-Install Docker, Git, Python 3, GitHub CLI, CA certificates, and internal DNS/CA trust. Allow outbound access to GitHub, the Semgrep rule registry if `p/owasp-top-ten` is used, the ZAP container registry, and approved test targets. Deny broad production network access.
+Install Docker, Git, Python 3, GitHub CLI, CA certificates, and internal DNS/CA trust.
+
+### Network Access Requirements
+
+Configure outbound network access as follows:
+
+**Required** (for tool operation):
+- `github.com` - Clone target repositories
+- Container registries:
+  - `ghcr.io` - For ZAP container
+  - `docker.io` or `registry.hub.docker.com` - For Semgrep container
+
+**Optional but recommended** (for enhanced scanning):
+- `semgrep.dev` (HTTPS 443) - Download OWASP Top Ten ruleset
+  - If unavailable: Script falls back to local config automatically
+  - No workflow failure if unreachable
+
+**Never allow:**
+- Broad production network access
+- Outbound to non-approved targets
+- Access to private/sensitive infrastructure from this runner
+
+### Network Failover Behavior
+
+The Semgrep scanner will:
+1. **Attempt remote rules first** (requires network to semgrep.dev)
+   - Downloads OWASP Top Ten ruleset for enhanced scanning
+   - Combines with local rules in `configs/semgrep/`
+2. **Fallback to local rules** if network unavailable
+   - Automatically retries with local config only
+   - No workflow failure
+   - Reduced rule coverage but still effective
+
+This ensures scans complete even in air-gapped or restricted network environments.
 
 ## 4. Configure authentication
 
@@ -88,5 +121,69 @@ Use WSTG as the human and automated test catalog, ASVS as the application verifi
 
 Use [OWASP-PENETRATION-TESTING-WORKFLOW.md](OWASP-PENETRATION-TESTING-WORKFLOW.md) for the operational assessment process. It covers written authorization and rules of engagement, scope and safety controls, reconnaissance, threat modeling, WSTG/ASVS/API/MASVS/cloud coverage, automated and manual execution, sanitized evidence, severity, reporting, risk decisions, remediation, retesting, and closure.
 
-The central workflow is one part of that process. A successful GitHub Actions run does not replace manual authorization, business-logic and authorization testing, coverage review, or an independent assessment for high-risk appl
+The central workflow is one part of that process. A successful GitHub Actions run does not replace manual authorization, business-logic and authorization testing, coverage review, or an independent assessment for high-risk applications.
+
+---
+
+## Troubleshooting
+
+### Semgrep Network Connectivity Issues
+
+**Problem**: Workflow fails with `NameResolutionError` or `ConnectionError` when trying to reach `semgrep.dev`
+
+**Cause**: The self-hosted runner cannot reach semgrep.dev to download the OWASP Top Ten ruleset. This may occur in:
+- Air-gapped networks without internet access
+- Restricted network environments with firewall rules
+- DNS resolution failures
+- Temporary network outages
+
+**Solution**: The script automatically handles this gracefully:
+1. Attempts to download remote OWASP Top Ten ruleset
+2. If network is unavailable, falls back to local config only
+3. Workflow completes successfully with reduced rule coverage
+
+**Verify it's working**: Check GitHub Actions output for:
+```
+Attempting Semgrep scan with OWASP Top Ten rules...
+WARNING: Cannot reach semgrep.dev (network unreachable). Falling back to local configuration only.
+```
+
+This is expected in restricted network environments and is not a failure.
+
+**To restore full coverage**:
+Option 1: Enable outbound HTTPS access to `semgrep.dev:443` in your firewall rules
+Option 2: Pre-download OWASP rules and commit them to `configs/semgrep/` as local config
+
+### Container Registry Access
+
+**Problem**: Docker container pull fails for semgrep or zaproxy images
+
+**Solution**: Ensure outbound access to container registries:
+- `docker.io` (Docker Hub) - For Semgrep container
+- `ghcr.io` (GitHub Container Registry) - For ZAP container
+
+Alternatively, pre-pull and cache container images on your runners.
+
+### HTML Report Generation
+
+**Problem**: HTML reports not generated in artifacts
+
+**Cause**: Python 3 or required packages not installed
+
+**Solution**:
+1. Verify Python 3 is installed on the runner: `python3 --version`
+2. Ensure runner has write access to output directory
+3. Check workflow logs for Python error messages
+
+### GitHub Token Permissions
+
+**Problem**: Workflow fails when cloning private repositories
+
+**Solution**:
+1. Create `SECURITY_REPO_TOKEN` organization secret
+2. Grant it read-only `Contents` access to target repositories
+3. Ensure dispatcher has permission to send `repository_dispatch` events
+
+See "Configure authentication" section above for details.
+
 
