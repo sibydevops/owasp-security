@@ -34,6 +34,19 @@ on:
         options: [baseline, full, api, none]
   repository_dispatch:
     types: [owasp-security-scan]
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  schedule:
+    # Nightly SAST scan at 2 AM UTC
+    - cron: '0 2 * * *'
+    # Weekly full scan on Saturdays at 4 AM UTC (when DAST enabled via secrets)
+    - cron: '0 4 * * 6'
 
 concurrency:
   group: security-${{ inputs.target_repository || github.event.client_payload.target_repository || github.repository }}-${{ inputs.target_sha || github.event.client_payload.target_sha || github.sha }}
@@ -56,6 +69,7 @@ jobs:
       - uses: actions/checkout@v4
       - id: input
         env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
           WD_REPOSITORY: ${{ inputs.target_repository || github.repository }}
           WD_SHA: ${{ inputs.target_sha || github.sha }}
           WD_APP_TYPE: ${{ inputs.app_type }}
@@ -68,6 +82,8 @@ jobs:
           RD_TARGET_URL: ${{ github.event.client_payload.target_url }}
           RD_OPENAPI_URL: ${{ github.event.client_payload.openapi_url }}
           RD_DAST_MODE: ${{ github.event.client_payload.dast_mode }}
+          SCHEDULED_TARGET_URL: ${{ secrets.STAGING_URL || '' }}
+          SCHEDULED_DAST_MODE: ${{ github.event_name == 'schedule' && 'baseline' || 'none' }}
         run: bash ./scripts/normalize-inputs.sh
 
   sast:
