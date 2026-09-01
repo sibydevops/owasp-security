@@ -17,3 +17,7 @@ else
   echo '{"site":[]}' > "$out/zap.json"
   python3 scripts/convert_json_to_yaml.py "$out/zap.json" "$out/zap.yaml"
 fi
+
+# Generate HTML report
+python3 scripts/generate-html-report.py zap "$out/zap.json" "$out/zap.html"
+

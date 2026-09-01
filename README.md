@@ -5,9 +5,21 @@ A central GitHub Actions reference implementation for scanning a changed reposit
 - Semgrep Community Edition SAST using open-source OWASP-oriented rules
 - OWASP ZAP baseline, full, or API DAST
 - Automatic repository classification for web, API, cloud-native, desktop, library, and unknown repositories
-- JSON, SARIF, YAML, Markdown, and ZAP report artifacts
+- **🎨 Interactive HTML reports** + JSON, YAML, Markdown, and SARIF artifacts
 - Configurable security gate
 - No Gitleaks, Trivy, paid scanner, or scheduled trigger
+
+## Report Artifacts
+
+Each scan generates comprehensive reports in multiple formats:
+
+- **HTML** - Interactive, visual reports for stakeholders (open in browser)
+- **YAML** - Structured format for documentation and version control
+- **JSON** - Machine-readable format for tool integration
+- **Markdown** - Quick summaries for GitHub comments
+
+📚 **[Artifact Quick Start Guide](docs/ARTIFACTS-QUICKSTART.md)** - Start here!  
+📖 **[Complete Artifact Documentation](docs/ARTIFACT-FORMATS.md)** - Detailed reference
 
 ## Important trigger limitation
 
