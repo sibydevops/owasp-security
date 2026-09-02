@@ -1,0 +1,583 @@
+name: Reusable OWASP ZAP API Scan
+
+on:
+  workflow_call:
+    inputs:
+      enabled:
+        description: Enable API DAST
+        required: false
+        default: false
+        type: boolean
+
+      openapi_file:
+        description: Repository-relative OpenAPI file
+        required: false
+        default: .zap/openapi/example.yml
+        type: string
+
+      fail_on_zap_risk:
+        description: NONE, INFORMATIONAL, LOW, MEDIUM, or HIGH
+        required: false
+        default: NONE
+        type: string
+
+    outputs:
+      scan_status:
+        description: API DAST control status
+        value: ${{ jobs.dast_api.outputs.scan_status }}
+
+  workflow_dispatch:
+    inputs:
+      enabled:
+        description: Enable API DAST
+        required: false
+        default: true
+        type: boolean
+
+      openapi_file:
+        description: Repository-relative OpenAPI file
+        required: false
+        default: .zap/openapi/example.yml
+        type: string
+
+      fail_on_zap_risk:
+        description: ZAP risk threshold
+        required: false
+        default: NONE
+        type: choice
+        options:
+          - NONE
+          - INFORMATIONAL
+          - LOW
+          - MEDIUM
+          - HIGH
+
+permissions:
+  contents: read
+
+jobs:
+  dast_api:
+    name: OWASP ZAP API DAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    outputs:
+      scan_status: ${{ steps.status.outputs.scan_status }}
+
+    env:
+      API_SCAN_ENABLED: ${{ inputs.enabled }}
+      OPENAPI_FILE: ${{ inputs.openapi_file }}
+      ZAP_IMAGE: ghcr.io/zaproxy/zaproxy:stable
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 -m pip install \
+            --disable-pip-version-check \
+            pyyaml
+
+      - name: Create API report directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p reports/dast-api
+
+      - name: Determine API scan applicability
+        id: applicability
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          applicable=false
+          reason=""
+
+          if [[ "$API_SCAN_ENABLED" != "true" ]]; then
+            reason="API DAST is disabled"
+          elif [[ ! -s "$OPENAPI_FILE" ]]; then
+            reason="OpenAPI file is missing or empty: $OPENAPI_FILE"
+          else
+            applicable=true
+          fi
+
+          {
+            echo "applicable=$applicable"
+            echo "reason=$reason"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "API DAST applicable: $applicable"
+
+          if [[ -n "$reason" ]]; then
+            echo "Reason: $reason"
+          fi
+
+      - name: Validate OpenAPI document
+        if: ${{ steps.applicability.outputs.applicable == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - "$OPENAPI_FILE" <<'PY'
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          path = Path(sys.argv[1])
+
+          document = yaml.safe_load(
+              path.read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          if not isinstance(
+              document,
+              dict,
+          ):
+              raise SystemExit(
+                  "OpenAPI document must contain a mapping"
+              )
+
+          version = document.get(
+              "openapi"
+          )
+
+          if not version:
+              raise SystemExit(
+                  "OpenAPI version is missing"
+              )
+
+          paths = document.get(
+              "paths"
+          )
+
+          if not isinstance(
+              paths,
+              dict,
+          ):
+              raise SystemExit(
+                  "OpenAPI paths must contain a mapping"
+              )
+
+          if not paths:
+              raise SystemExit(
+                  "OpenAPI document does not define any paths"
+              )
+
+          print(
+              f"Validated OpenAPI document: {path}"
+          )
+
+          print(
+              f"OpenAPI version: {version}"
+          )
+
+          print(
+              f"API paths: {len(paths)}"
+          )
+          PY
+
+      - name: Prepare API scan workspace
+        if: ${{ steps.applicability.outputs.applicable == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp \
+            "$OPENAPI_FILE" \
+            reports/dast-api/openapi.yml
+
+          if [[ -s .zap/rules.tsv ]]; then
+            cp \
+              .zap/rules.tsv \
+              reports/dast-api/rules.tsv
+          fi
+
+          chmod 0777 reports/dast-api
+
+      - name: Run OWASP ZAP API scan
+        if: ${{ steps.applicability.outputs.applicable == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          report_directory="$(
+            cd reports/dast-api
+            pwd
+          )"
+
+          docker pull "$ZAP_IMAGE"
+
+          set +e
+
+          docker run \
+            --rm \
+            --network host \
+            --volume \
+            "$report_directory:/zap/wrk/:rw" \
+            "$ZAP_IMAGE" \
+            zap-api-scan.py \
+            -t /zap/wrk/openapi.yml \
+            -f openapi \
+            -J zap.json \
+            -w zap.md \
+            -r zap.html \
+            -I
+
+          scanner_exit_code=$?
+
+          set -e
+
+          echo "ZAP API scanner exit code: $scanner_exit_code"
+
+          sudo chown \
+            --recursive \
+            "$(id -u):$(id -g)" \
+            reports/dast-api \
+            2>/dev/null || true
+
+          chmod \
+            --recursive \
+            u+rwX \
+            reports/dast-api
+
+          test -s reports/dast-api/zap.json || {
+            echo "::error::ZAP API JSON report was not generated"
+            exit 1
+          }
+
+      - name: Generate applicable API DAST reports
+        if: ${{ steps.applicability.outputs.applicable == 'true' }}
+        uses: ./.github/actions/security-report
+        with:
+          tool: zap
+          input-file: reports/dast-api/zap.json
+          output-directory: reports/dast-api
+          repository: ${{ github.repository }}
+          sha: ${{ github.sha }}
+          scan-mode: api
+
+      - name: Create applicable API DAST status
+        if: ${{ steps.applicability.outputs.applicable == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s reports/dast-api/zap-status.json || {
+            echo "::error::zap-status.json is missing"
+            exit 1
+          }
+
+          test -s reports/dast-api/zap-status.yaml || {
+            echo "::error::zap-status.yaml is missing"
+            exit 1
+          }
+
+          python3 - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          import yaml
+
+          source_path = Path(
+              "reports/dast-api/zap-status.json"
+          )
+
+          document = json.loads(
+              source_path.read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          control = document.get(
+              "control",
+              {},
+          )
+
+          if not isinstance(
+              control,
+              dict,
+          ):
+              raise SystemExit(
+                  "ZAP status does not contain a control object"
+              )
+
+          control["id"] = "DAST_API"
+          control["status"] = "completed"
+          control["tool"] = "owasp-zap"
+          control["scan_mode"] = "api"
+          control["recorded_at"] = datetime.now(
+              timezone.utc
+          ).isoformat()
+
+          output_document = {
+              "control": control
+          }
+
+          Path(
+              "reports/dast-api/"
+              "dast-api-status.json"
+          ).write_text(
+              json.dumps(
+                  output_document,
+                  indent=2,
+                  ensure_ascii=False,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+
+          Path(
+              "reports/dast-api/"
+              "dast-api-status.yaml"
+          ).write_text(
+              yaml.safe_dump(
+                  output_document,
+                  sort_keys=False,
+                  allow_unicode=True,
+              ),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Create non-applicable API DAST status
+        if: ${{ steps.applicability.outputs.applicable != 'true' }}
+        env:
+          NON_APPLICABLE_REASON: >-
+            ${{ steps.applicability.outputs.reason }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          import yaml
+
+          reason = os.getenv(
+              "NON_APPLICABLE_REASON",
+              "",
+          ).strip()
+
+          if not reason:
+              reason = (
+                  "API DAST is disabled or no usable "
+                  "OpenAPI document is configured"
+              )
+
+          document = {
+              "control": {
+                  "id": "DAST_API",
+                  "status": "not_applicable",
+                  "reason": reason,
+                  "tool": "owasp-zap",
+                  "repository": os.getenv(
+                      "GITHUB_REPOSITORY",
+                      "",
+                  ),
+                  "sha": os.getenv(
+                      "GITHUB_SHA",
+                      "",
+                  ),
+                  "scan_mode": "api",
+                  "findings": 0,
+                  "severity": {},
+                  "evidence": [],
+                  "recorded_at": datetime.now(
+                      timezone.utc
+                  ).isoformat(),
+              }
+          }
+
+          output_directory = Path(
+              "reports/dast-api"
+          )
+
+          output_directory.mkdir(
+              parents=True,
+              exist_ok=True,
+          )
+
+          (
+              output_directory
+              / "dast-api-status.json"
+          ).write_text(
+              json.dumps(
+                  document,
+                  indent=2,
+                  ensure_ascii=False,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+
+          (
+              output_directory
+              / "dast-api-status.yaml"
+          ).write_text(
+              yaml.safe_dump(
+                  document,
+                  sort_keys=False,
+                  allow_unicode=True,
+              ),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Validate canonical API DAST status
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s \
+            reports/dast-api/dast-api-status.json || {
+            echo "::error::dast-api-status.json is missing"
+            exit 1
+          }
+
+          test -s \
+            reports/dast-api/dast-api-status.yaml || {
+            echo "::error::dast-api-status.yaml is missing"
+            exit 1
+          }
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          import yaml
+
+          path = Path(
+              "reports/dast-api/"
+              "dast-api-status.yaml"
+          )
+
+          document = yaml.safe_load(
+              path.read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          if not isinstance(
+              document,
+              dict,
+          ):
+              raise SystemExit(
+                  "API status must contain a mapping"
+              )
+
+          control = document.get(
+              "control"
+          )
+
+          if not isinstance(
+              control,
+              dict,
+          ):
+              raise SystemExit(
+                  "API status is missing the control mapping"
+              )
+
+          if control.get("id") != "DAST_API":
+              raise SystemExit(
+                  "API status control ID must be DAST_API"
+              )
+
+          status = control.get(
+              "status"
+          )
+
+          if status not in {
+              "completed",
+              "not_applicable",
+          }:
+              raise SystemExit(
+                  f"Unexpected API DAST status: {status}"
+              )
+
+          if (
+              status == "not_applicable"
+              and not str(
+                  control.get(
+                      "reason",
+                      "",
+                  )
+              ).strip()
+          ):
+              raise SystemExit(
+                  "Non-applicable API status requires a reason"
+              )
+
+          print(
+              f"API DAST status: {status}"
+          )
+          PY
+
+      - name: Set API DAST output
+        id: status
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          scan_status="$(
+            python3 - <<'PY'
+          from pathlib import Path
+
+          import yaml
+
+          document = yaml.safe_load(
+              Path(
+                  "reports/dast-api/"
+                  "dast-api-status.yaml"
+              ).read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          print(
+              document[
+                  "control"
+              ][
+                  "status"
+              ]
+          )
+          PY
+          )"
+
+          echo "scan_status=$scan_status" \
+            >> "$GITHUB_OUTPUT"
+
+          echo "API DAST output status: $scan_status"
+
+      - name: List API DAST evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set +e
+
+          find reports/dast-api \
+            -maxdepth 3 \
+            -type f \
+            -printf '%s bytes %p\n' |
+            sort
+
+          exit 0
+
+      - name: Upload API DAST reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-api-reports-${{ github.sha }}
+          path: reports/dast-api/
+          if-no-files-found: error
+          retention-days: 30

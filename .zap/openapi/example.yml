@@ -1,0 +1,55 @@
+openapi: 3.0.3
+
+info:
+  title: Example Security Test API
+  description: >-
+    Example OpenAPI document for configuring an authorized
+    OWASP ZAP API scan.
+  version: 1.0.0
+
+servers:
+  - url: https://api-test.example.com
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Return application health
+      responses:
+        "200":
+          description: Application is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: healthy
+
+  /api/items:
+    get:
+      operationId: listItems
+      summary: Return available items
+      responses:
+        "200":
+          description: Item collection
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Item"
+
+components:
+  schemas:
+    Item:
+      type: object
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+        name:
+          type: string

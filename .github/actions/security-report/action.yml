@@ -1,0 +1,102 @@
+name: Security Report Converter
+
+description: >-
+  Converts Semgrep or OWASP ZAP JSON into normalized JSON,
+  YAML, Markdown, HTML, and control-status evidence.
+
+inputs:
+  tool:
+    description: Scanner type. Supported values are semgrep and zap.
+    required: true
+
+  input-file:
+    description: Source scanner JSON report.
+    required: true
+
+  output-directory:
+    description: Output directory.
+    required: false
+    default: reports
+
+  repository:
+    description: Repository associated with the assessment.
+    required: false
+    default: ""
+
+  sha:
+    description: Commit SHA associated with the assessment.
+    required: false
+    default: ""
+
+  scan-mode:
+    description: Scan mode, such as sast, baseline, full, or api.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+
+  steps:
+    - name: Install report dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        python3 -m pip install \
+          --disable-pip-version-check \
+          pyyaml
+
+    - name: Validate report converter
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        python3 -m py_compile \
+          "${{ github.action_path }}/report_converter.py"
+
+    - name: Generate security reports
+      shell: bash
+      env:
+        REPORT_TOOL: ${{ inputs.tool }}
+        REPORT_INPUT: ${{ inputs.input-file }}
+        REPORT_OUTPUT: ${{ inputs.output-directory }}
+        REPORT_REPOSITORY: ${{ inputs.repository }}
+        REPORT_SHA: ${{ inputs.sha }}
+        REPORT_SCAN_MODE: ${{ inputs.scan-mode }}
+      run: |
+        set -euo pipefail
+
+        python3 \
+          "${{ github.action_path }}/report_converter.py"
+
+    - name: Validate generated reports
+      shell: bash
+      env:
+        REPORT_TOOL: ${{ inputs.tool }}
+        REPORT_OUTPUT: ${{ inputs.output-directory }}
+      run: |
+        set -euo pipefail
+
+        required_files=(
+          "$REPORT_OUTPUT/$REPORT_TOOL-normalized.json"
+          "$REPORT_OUTPUT/$REPORT_TOOL-normalized.yaml"
+          "$REPORT_OUTPUT/$REPORT_TOOL-summary.md"
+          "$REPORT_OUTPUT/$REPORT_TOOL-report.html"
+          "$REPORT_OUTPUT/$REPORT_TOOL-status.json"
+          "$REPORT_OUTPUT/$REPORT_TOOL-status.yaml"
+        )
+
+        for file in "${required_files[@]}"; do
+          test -s "$file" || {
+            echo "::error::Generated report is missing: $file"
+            exit 1
+          }
+        done
+
+        echo "Generated report files:"
+
+        find "$REPORT_OUTPUT" \
+          -maxdepth 2 \
+          -type f \
+          -printf '%s bytes %p\n' |
+          sort

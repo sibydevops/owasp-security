@@ -1,0 +1,630 @@
+name: Mandatory OWASP Security
+
+run-name: >-
+  OWASP Assessment ${{ github.repository }} at ${{ github.sha }}
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: Authorized DAST URL; empty uses local OWASP Juice Shop
+        required: false
+        default: ""
+        type: string
+
+      dast_mode:
+        description: OWASP ZAP web scan mode
+        required: false
+        default: baseline
+        type: choice
+        options:
+          - baseline
+          - full
+
+      api_scan_enabled:
+        description: Run API DAST using the configured OpenAPI file
+        required: false
+        default: false
+        type: boolean
+
+      openapi_file:
+        description: Repository-relative OpenAPI file
+        required: false
+        default: .zap/openapi/example.yml
+        type: string
+
+      coverage_command:
+        description: Optional test command that generates coverage
+        required: false
+        default: ""
+        type: string
+
+      coverage_report:
+        description: Optional generated coverage report path
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: >-
+    owasp-security-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sast:
+    name: Execute Mandatory SAST
+    uses: ./.github/workflows/ci-security.yml
+    with:
+      semgrep_config: >-
+        ${{ vars.SEMGREP_CONFIG || 'auto' }}
+
+      fail_on_sast: >-
+        ${{ vars.FAIL_ON_SAST || 'ERROR' }}
+
+  dependency_review:
+    name: Execute Dependency Review
+    uses: ./.github/workflows/ci-dependency-review.yml
+    with:
+      fail_on_dependency: >-
+        ${{ vars.FAIL_ON_DEPENDENCY || 'CRITICAL' }}
+
+  code_coverage:
+    name: Collect Code Coverage Evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    outputs:
+      scan_status: ${{ steps.coverage.outputs.status }}
+      percentage: ${{ steps.coverage.outputs.percentage }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate coverage action
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f \
+            .github/actions/code-coverage/action.yml || {
+            echo "::error::Code coverage action is missing"
+            exit 1
+          }
+
+      - name: Run code coverage action
+        id: coverage
+        uses: ./.github/actions/code-coverage
+        with:
+          test-command: >-
+            ${{ inputs.coverage_command || vars.COVERAGE_COMMAND || '' }}
+
+          report-path: >-
+            ${{ inputs.coverage_report || vars.COVERAGE_REPORT_PATH || '' }}
+
+          minimum-coverage: >-
+            ${{ vars.MINIMUM_CODE_COVERAGE || '0' }}
+
+          output-directory: reports/coverage
+
+      - name: Validate coverage evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          required_files=(
+            "reports/coverage/coverage-status.json"
+            "reports/coverage/coverage-status.yaml"
+            "reports/coverage/coverage-report.html"
+          )
+
+          for file in "${required_files[@]}"; do
+            test -s "$file" || {
+              echo "::error::Coverage evidence is missing: $file"
+              exit 1
+            }
+          done
+
+      - name: Upload coverage reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports-${{ github.sha }}
+          path: reports/coverage/
+          if-no-files-found: warn
+          retention-days: 30
+
+  dast_web:
+    name: Execute Mandatory Web DAST
+    uses: ./.github/workflows/dast-zap-scan.yml
+    with:
+      target_url: >-
+        ${{ inputs.target_url || vars.DAST_TARGET_URL || '' }}
+
+      mode: >-
+        ${{ inputs.dast_mode || vars.DEFAULT_DAST_MODE || 'baseline' }}
+
+      fail_on_zap_risk: >-
+        ${{ vars.FAIL_ON_ZAP_RISK || 'NONE' }}
+
+  dast_api:
+    name: Execute API DAST Assessment
+    uses: ./.github/workflows/dast-zap-api-scan.yml
+    with:
+      enabled: >-
+        ${{ inputs.api_scan_enabled || false }}
+
+      openapi_file: >-
+        ${{ inputs.openapi_file || '.zap/openapi/example.yml' }}
+
+      fail_on_zap_risk: >-
+        ${{ vars.FAIL_ON_ZAP_RISK || 'NONE' }}
+
+  consolidate:
+    name: Consolidate OWASP Evidence
+
+    needs:
+      - sast
+      - dependency_review
+      - code_coverage
+      - dast_web
+      - dast_api
+
+    if: ${{ always() }}
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Validate consolidation script
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f \
+            scripts/generate-consolidated-report.py || {
+            echo "::error::Consolidated report script is missing"
+            exit 1
+          }
+
+          python3 -m py_compile \
+            scripts/generate-consolidated-report.py
+
+      - name: Create consolidated report directories
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p \
+            reports/sast \
+            reports/dependencies \
+            reports/coverage \
+            reports/dast-web \
+            reports/dast-api \
+            reports/status
+
+      - name: Download SAST reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: sast-reports-${{ github.sha }}
+          path: reports/sast
+
+      - name: Download dependency reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dependency-reports-${{ github.sha }}
+          path: reports/dependencies
+
+      - name: Download coverage reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-reports-${{ github.sha }}
+          path: reports/coverage
+
+      - name: Download web DAST reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dast-web-reports-${{ github.sha }}
+          path: reports/dast-web
+
+      - name: Download API DAST reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: dast-api-reports-${{ github.sha }}
+          path: reports/dast-api
+
+      - name: Install report dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 -m pip install \
+            --disable-pip-version-check \
+            pyyaml
+
+      - name: Record upstream job results
+        env:
+          JOB_RESULTS: ${{ toJson(needs) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          printf '%s\n' "$JOB_RESULTS" \
+            > reports/job-results.json
+
+          python3 -m json.tool \
+            reports/job-results.json \
+            > /dev/null
+
+      - name: Collect control status files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find reports \
+            -type f \
+            -name '*-status.yaml' \
+            -not -path 'reports/status/*' \
+            -exec cp {} reports/status/ \;
+
+          echo "Collected control status files:"
+
+          find reports/status \
+            -maxdepth 1 \
+            -type f \
+            -printf '%s bytes %p\n' |
+            sort || true
+
+      - name: Generate consolidated OWASP reports
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 \
+            scripts/generate-consolidated-report.py \
+            reports \
+            --repository "${{ github.repository }}" \
+            --sha "${{ github.sha }}"
+
+      - name: Validate consolidated reports
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          required_files=(
+            "reports/job-results.json"
+            "reports/owasp-summary.json"
+            "reports/owasp-summary.yaml"
+            "reports/owasp-summary.md"
+            "reports/owasp-summary.html"
+            "reports/report-manifest.yaml"
+          )
+
+          for file in "${required_files[@]}"; do
+            test -s "$file" || {
+              echo "::error::Consolidated report is missing: $file"
+              exit 1
+            }
+          done
+
+      - name: List complete OWASP evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find reports \
+            -maxdepth 5 \
+            -type f \
+            -printf '%s bytes %p\n' |
+            sort
+
+      - name: Upload consolidated OWASP evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-security-assessment-${{ github.sha }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30
+
+  mandatory_gate:
+    name: OWASP Mandatory Security Gate
+
+    needs:
+      - sast
+      - dependency_review
+      - code_coverage
+      - dast_web
+      - dast_api
+      - consolidate
+
+    if: ${{ always() }}
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    outputs:
+      assessment_status: ${{ steps.gate_result.outputs.status }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Validate mandatory gate script
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f scripts/mandatory-gate.py || {
+            echo "::error::Mandatory gate script is missing"
+            exit 1
+          }
+
+          python3 -m py_compile \
+            scripts/mandatory-gate.py
+
+      - name: Create gate report directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p reports
+
+      - name: Download consolidated OWASP evidence
+        if: ${{ needs.consolidate.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: owasp-security-assessment-${{ github.sha }}
+          path: reports
+
+      - name: Install mandatory gate dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 -m pip install \
+            --disable-pip-version-check \
+            pyyaml
+
+      - name: Record all job results
+        env:
+          JOB_RESULTS: ${{ toJson(needs) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          printf '%s\n' "$JOB_RESULTS" \
+            > reports/job-results.json
+
+          python3 -m json.tool \
+            reports/job-results.json \
+            > /dev/null
+
+      - name: Validate mandatory scanner execution
+        env:
+          SAST_RESULT: ${{ needs.sast.result }}
+          DEPENDENCY_RESULT: ${{ needs.dependency_review.result }}
+          COVERAGE_RESULT: ${{ needs.code_coverage.result }}
+          DAST_WEB_RESULT: ${{ needs.dast_web.result }}
+          DAST_API_RESULT: ${{ needs.dast_api.result }}
+          CONSOLIDATE_RESULT: ${{ needs.consolidate.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          failures=0
+
+          check_job() {
+            local job_name="$1"
+            local job_result="$2"
+
+            if [[ "$job_result" != "success" ]]; then
+              echo "::error::$job_name result: $job_result"
+              failures=$((failures + 1))
+            else
+              echo "$job_name completed successfully"
+            fi
+          }
+
+          check_job \
+            "Semgrep SAST" \
+            "$SAST_RESULT"
+
+          check_job \
+            "Dependency review" \
+            "$DEPENDENCY_RESULT"
+
+          check_job \
+            "Code coverage evidence" \
+            "$COVERAGE_RESULT"
+
+          check_job \
+            "OWASP ZAP Web DAST" \
+            "$DAST_WEB_RESULT"
+
+          check_job \
+            "OWASP ZAP API DAST" \
+            "$DAST_API_RESULT"
+
+          check_job \
+            "OWASP evidence consolidation" \
+            "$CONSOLIDATE_RESULT"
+
+          if [[ "$failures" -gt 0 ]]; then
+            echo "::error::$failures mandatory job(s) did not succeed"
+            exit 1
+          fi
+
+      - name: Validate mandatory evidence files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          required_files=(
+            "reports/sast/semgrep.json"
+            "reports/sast/semgrep-normalized.json"
+            "reports/sast/semgrep-normalized.yaml"
+            "reports/sast/semgrep-report.html"
+            "reports/sast/semgrep-status.yaml"
+            "reports/dependencies/dependency-review.json"
+            "reports/dependencies/dependency-review.yaml"
+            "reports/dependencies/dependency-review.html"
+            "reports/dependencies/dependency-status.yaml"
+            "reports/coverage/coverage-status.yaml"
+            "reports/coverage/coverage-report.html"
+            "reports/dast-web/zap.json"
+            "reports/dast-web/zap-normalized.json"
+            "reports/dast-web/zap-normalized.yaml"
+            "reports/dast-web/zap-report.html"
+            "reports/dast-web/dast-web-status.yaml"
+            "reports/dast-api/dast-api-status.yaml"
+            "reports/owasp-summary.json"
+            "reports/owasp-summary.yaml"
+            "reports/owasp-summary.md"
+            "reports/owasp-summary.html"
+            "reports/report-manifest.yaml"
+          )
+
+          for file in "${required_files[@]}"; do
+            test -s "$file" || {
+              echo "::error::Mandatory evidence is missing: $file"
+              exit 1
+            }
+          done
+
+          echo "All mandatory OWASP evidence is present"
+
+      - name: Apply mandatory OWASP policy
+        env:
+          FAIL_ON_SAST: >-
+            ${{ vars.FAIL_ON_SAST || 'ERROR' }}
+
+          FAIL_ON_DEPENDENCY: >-
+            ${{ vars.FAIL_ON_DEPENDENCY || 'CRITICAL' }}
+
+          FAIL_ON_ZAP_RISK: >-
+            ${{ vars.FAIL_ON_ZAP_RISK || 'NONE' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 \
+            scripts/mandatory-gate.py \
+            reports \
+            --job-results reports/job-results.json \
+            --output reports/mandatory-gate.yaml
+
+      - name: Validate mandatory gate output
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s reports/mandatory-gate.yaml || {
+            echo "::error::Mandatory gate YAML is missing"
+            exit 1
+          }
+
+          test -s reports/mandatory-gate.json || {
+            echo "::error::Mandatory gate JSON is missing"
+            exit 1
+          }
+
+      - name: Record successful gate result
+        id: gate_result
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "status=passed" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Upload mandatory gate results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mandatory-gate-${{ github.sha }}
+          path: |
+            reports/mandatory-gate.json
+            reports/mandatory-gate.yaml
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish gate summary
+        if: ${{ always() }}
+        env:
+          SAST_RESULT: ${{ needs.sast.result }}
+          DEPENDENCY_RESULT: ${{ needs.dependency_review.result }}
+          COVERAGE_RESULT: ${{ needs.code_coverage.result }}
+          DAST_WEB_RESULT: ${{ needs.dast_web.result }}
+          DAST_API_RESULT: ${{ needs.dast_api.result }}
+          CONSOLIDATE_RESULT: ${{ needs.consolidate.result }}
+        shell: bash
+        run: |
+          {
+            echo "## OWASP Mandatory Security Gate"
+            echo
+            echo "| Control | Result |"
+            echo "|---|---|"
+            echo "| Semgrep SAST | $SAST_RESULT |"
+            echo "| Dependency review | $DEPENDENCY_RESULT |"
+            echo "| Code coverage | $COVERAGE_RESULT |"
+            echo "| Web DAST | $DAST_WEB_RESULT |"
+            echo "| API DAST | $DAST_API_RESULT |"
+            echo "| Evidence consolidation | $CONSOLIDATE_RESULT |"
+            echo
+            echo "Artifact: owasp-security-assessment-$GITHUB_SHA"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  notify:
+    name: Notify Assessment Result
+
+    needs:
+      - sast
+      - dependency_review
+      - code_coverage
+      - dast_web
+      - dast_api
+      - mandatory_gate
+
+    if: ${{ always() }}
+
+    uses: ./.github/workflows/notify-build-completed.yml
+
+    with:
+      assessment_status: ${{ needs.mandatory_gate.result }}
+      sast_status: ${{ needs.sast.result }}
+      dependency_status: ${{ needs.dependency_review.result }}
+      coverage_status: ${{ needs.code_coverage.result }}
+      dast_web_status: ${{ needs.dast_web.result }}
+      dast_api_status: ${{ needs.dast_api.result }}
+
+      artifact_name: >-
+        owasp-security-assessment-${{ github.sha }}
+
+    secrets:
+      TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}

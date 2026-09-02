@@ -1,0 +1,18 @@
+# OWASP ZAP rule configuration
+#
+# Format:
+# rule-id    action    comment
+#
+# Supported actions:
+# IGNORE
+# INFO
+# WARN
+# FAIL
+
+10021	WARN	X-Content-Type-Options header
+10035	WARN	Strict-Transport-Security header
+10038	WARN	Content-Security-Policy header
+10020	WARN	X-Frame-Options header
+10049	WARN	Non-storable content
+10055	WARN	CSP wildcard directive
+10096	WARN	Timestamp disclosure

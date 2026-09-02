@@ -1,0 +1,213 @@
+name: Reusable Semgrep SAST
+
+on:
+  workflow_call:
+    inputs:
+      semgrep_config:
+        description: Semgrep configuration
+        required: false
+        default: auto
+        type: string
+
+      fail_on_sast:
+        description: NONE, INFO, WARNING, or ERROR
+        required: false
+        default: ERROR
+        type: string
+
+    outputs:
+      scan_status:
+        description: Semgrep execution status
+        value: ${{ jobs.sast.outputs.scan_status }}
+
+  workflow_dispatch:
+    inputs:
+      semgrep_config:
+        description: Semgrep configuration
+        required: false
+        default: auto
+        type: string
+
+      fail_on_sast:
+        description: SAST failure threshold
+        required: false
+        default: ERROR
+        type: choice
+        options:
+          - NONE
+          - INFO
+          - WARNING
+          - ERROR
+
+permissions:
+  contents: read
+
+jobs:
+  sast:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    outputs:
+      scan_status: ${{ steps.status.outputs.scan_status }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate SAST implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f scripts/run-semgrep.sh || {
+            echo "::error::scripts/run-semgrep.sh is missing"
+            exit 1
+          }
+
+          test -f \
+            .github/actions/security-report/action.yml || {
+            echo "::error::Security report action is missing"
+            exit 1
+          }
+
+          test -f \
+            .github/actions/security-report/report_converter.py || {
+            echo "::error::report_converter.py is missing"
+            exit 1
+          }
+
+          python3 -m py_compile \
+            .github/actions/security-report/report_converter.py
+
+      - name: Run Semgrep
+        env:
+          SEMGREP_CONFIG: >-
+            ${{ inputs.semgrep_config || vars.SEMGREP_CONFIG || 'auto' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p reports/sast
+
+          bash scripts/run-semgrep.sh \
+            . \
+            reports/sast
+
+          test -s reports/sast/semgrep.json || {
+            echo "::error::Semgrep JSON report is missing"
+            exit 1
+          }
+
+      - name: Generate SAST report formats
+        uses: ./.github/actions/security-report
+        with:
+          tool: semgrep
+          input-file: reports/sast/semgrep.json
+          output-directory: reports/sast
+          repository: ${{ github.repository }}
+          sha: ${{ github.sha }}
+          scan-mode: sast
+
+      - name: Set SAST status
+        id: status
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s reports/sast/semgrep-status.yaml
+
+          echo "scan_status=completed" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Apply SAST threshold
+        env:
+          FAIL_ON_SAST: >-
+            ${{ inputs.fail_on_sast || vars.FAIL_ON_SAST || 'ERROR' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          levels = {
+              "INFO": 1,
+              "WARNING": 2,
+              "ERROR": 3,
+              "NONE": 10_000,
+          }
+
+          threshold_name = os.getenv(
+              "FAIL_ON_SAST",
+              "ERROR",
+          ).strip().upper()
+
+          if threshold_name not in levels:
+              raise SystemExit(
+                  f"Invalid FAIL_ON_SAST: {threshold_name}"
+              )
+
+          report = json.loads(
+              Path(
+                  "reports/sast/semgrep.json"
+              ).read_text(encoding="utf-8")
+          )
+
+          results = report.get("results", [])
+
+          if not isinstance(results, list):
+              raise SystemExit(
+                  "Semgrep results must be an array"
+              )
+
+          blocking = []
+
+          if threshold_name != "NONE":
+              threshold = levels[threshold_name]
+
+              for result in results:
+                  if not isinstance(result, dict):
+                      continue
+
+                  extra = result.get("extra", {})
+
+                  if not isinstance(extra, dict):
+                      extra = {}
+
+                  severity = str(
+                      extra.get(
+                          "severity",
+                          "INFO",
+                      )
+                  ).strip().upper()
+
+                  rank = levels.get(
+                      severity,
+                      levels["INFO"],
+                  )
+
+                  if rank >= threshold:
+                      blocking.append(result)
+
+          print(f"SAST threshold: {threshold_name}")
+          print(
+              f"Blocking SAST findings: {len(blocking)}"
+          )
+
+          if blocking:
+              raise SystemExit(1)
+          PY
+
+      - name: Upload SAST reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-reports-${{ github.sha }}
+          path: reports/sast/
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,342 @@
+name: Notify Security Assessment
+
+on:
+  workflow_call:
+    inputs:
+      assessment_status:
+        description: Final OWASP assessment status
+        required: true
+        type: string
+
+      sast_status:
+        description: SAST execution status
+        required: true
+        type: string
+
+      dependency_status:
+        description: Dependency scan status
+        required: true
+        type: string
+
+      coverage_status:
+        description: Code coverage status
+        required: true
+        type: string
+
+      dast_web_status:
+        description: Web DAST execution status
+        required: true
+        type: string
+
+      dast_api_status:
+        description: API DAST execution status
+        required: true
+        type: string
+
+      artifact_name:
+        description: Consolidated security artifact name
+        required: true
+        type: string
+
+    secrets:
+      TEAMS_WEBHOOK_URL:
+        description: Optional Microsoft Teams workflow webhook URL
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: Publish Security Notification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Write notification summary
+        env:
+          ASSESSMENT_STATUS: ${{ inputs.assessment_status }}
+          SAST_STATUS: ${{ inputs.sast_status }}
+          DEPENDENCY_STATUS: ${{ inputs.dependency_status }}
+          COVERAGE_STATUS: ${{ inputs.coverage_status }}
+          DAST_WEB_STATUS: ${{ inputs.dast_web_status }}
+          DAST_API_STATUS: ${{ inputs.dast_api_status }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## OWASP Security Assessment"
+            echo
+            echo "| Item | Result |"
+            echo "|---|---|"
+            echo "| Repository | $GITHUB_REPOSITORY |"
+            echo "| Commit | $GITHUB_SHA |"
+            echo "| Final assessment | $ASSESSMENT_STATUS |"
+            echo "| SAST | $SAST_STATUS |"
+            echo "| Dependencies | $DEPENDENCY_STATUS |"
+            echo "| Coverage | $COVERAGE_STATUS |"
+            echo "| Web DAST | $DAST_WEB_STATUS |"
+            echo "| API DAST | $DAST_API_STATUS |"
+            echo "| Artifact | $ARTIFACT_NAME |"
+            echo
+            echo "### Workflow"
+            echo
+            echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check Teams notification configuration
+        id: teams
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$TEAMS_WEBHOOK_URL" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "Microsoft Teams notification is configured"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Microsoft Teams notification is not configured"
+          fi
+
+      - name: Build Microsoft Teams notification
+        if: ${{ steps.teams.outputs.configured == 'true' }}
+        env:
+          ASSESSMENT_STATUS: ${{ inputs.assessment_status }}
+          SAST_STATUS: ${{ inputs.sast_status }}
+          DEPENDENCY_STATUS: ${{ inputs.dependency_status }}
+          COVERAGE_STATUS: ${{ inputs.coverage_status }}
+          DAST_WEB_STATUS: ${{ inputs.dast_web_status }}
+          DAST_API_STATUS: ${{ inputs.dast_api_status }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY' > notification.json
+          import json
+          import os
+
+          repository = os.getenv(
+              "GITHUB_REPOSITORY",
+              "",
+          )
+
+          commit_sha = os.getenv(
+              "GITHUB_SHA",
+              "",
+          )
+
+          server_url = os.getenv(
+              "GITHUB_SERVER_URL",
+              "https://github.com",
+          )
+
+          run_id = os.getenv(
+              "GITHUB_RUN_ID",
+              "",
+          )
+
+          run_url = (
+              f"{server_url}/"
+              f"{repository}/"
+              f"actions/runs/"
+              f"{run_id}"
+          )
+
+          assessment_status = os.getenv(
+              "ASSESSMENT_STATUS",
+              "unknown",
+          )
+
+          if assessment_status.lower() in {
+              "success",
+              "passed",
+          }:
+              color = "Good"
+          elif assessment_status.lower() in {
+              "failure",
+              "failed",
+              "cancelled",
+              "timed_out",
+          }:
+              color = "Attention"
+          else:
+              color = "Warning"
+
+          facts = [
+              {
+                  "title": "Repository",
+                  "value": repository,
+              },
+              {
+                  "title": "Commit",
+                  "value": commit_sha,
+              },
+              {
+                  "title": "Assessment",
+                  "value": assessment_status,
+              },
+              {
+                  "title": "SAST",
+                  "value": os.getenv(
+                      "SAST_STATUS",
+                      "unknown",
+                  ),
+              },
+              {
+                  "title": "Dependencies",
+                  "value": os.getenv(
+                      "DEPENDENCY_STATUS",
+                      "unknown",
+                  ),
+              },
+              {
+                  "title": "Coverage",
+                  "value": os.getenv(
+                      "COVERAGE_STATUS",
+                      "unknown",
+                  ),
+              },
+              {
+                  "title": "Web DAST",
+                  "value": os.getenv(
+                      "DAST_WEB_STATUS",
+                      "unknown",
+                  ),
+              },
+              {
+                  "title": "API DAST",
+                  "value": os.getenv(
+                      "DAST_API_STATUS",
+                      "unknown",
+                  ),
+              },
+              {
+                  "title": "Artifact",
+                  "value": os.getenv(
+                      "ARTIFACT_NAME",
+                      "",
+                  ),
+              },
+          ]
+
+          payload = {
+              "type": "message",
+              "attachments": [
+                  {
+                      "contentType": (
+                          "application/vnd.microsoft."
+                          "card.adaptive"
+                      ),
+                      "contentUrl": None,
+                      "content": {
+                          "$schema": (
+                              "http://adaptivecards.io/"
+                              "schemas/adaptive-card.json"
+                          ),
+                          "type": "AdaptiveCard",
+                          "version": "1.4",
+                          "body": [
+                              {
+                                  "type": "TextBlock",
+                                  "size": "Large",
+                                  "weight": "Bolder",
+                                  "text": (
+                                      "OWASP Security Assessment"
+                                  ),
+                              },
+                              {
+                                  "type": "TextBlock",
+                                  "weight": "Bolder",
+                                  "color": color,
+                                  "text": (
+                                      "Final status: "
+                                      f"{assessment_status}"
+                                  ),
+                              },
+                              {
+                                  "type": "FactSet",
+                                  "facts": facts,
+                              },
+                          ],
+                          "actions": [
+                              {
+                                  "type": "Action.OpenUrl",
+                                  "title": "Open workflow run",
+                                  "url": run_url,
+                              }
+                          ],
+                      },
+                  }
+              ],
+          }
+
+          print(
+              json.dumps(
+                  payload,
+                  indent=2,
+              )
+          )
+          PY
+
+          python3 -m json.tool \
+            notification.json \
+            > /dev/null
+
+          echo "Microsoft Teams payload generated"
+
+      - name: Send Microsoft Teams notification
+        if: ${{ steps.teams.outputs.configured == 'true' }}
+        continue-on-error: true
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          response_file="$RUNNER_TEMP/teams-response.txt"
+
+          http_status="$(
+            curl \
+              --silent \
+              --show-error \
+              --location \
+              --output "$response_file" \
+              --write-out '%{http_code}' \
+              --request POST \
+              --header "Content-Type: application/json" \
+              --data-binary @notification.json \
+              "$TEAMS_WEBHOOK_URL"
+          )"
+
+          echo "Microsoft Teams HTTP status: $http_status"
+
+          if [[ ! "$http_status" =~ ^2[0-9][0-9]$ ]]; then
+            echo "::warning::Microsoft Teams notification failed with HTTP $http_status"
+
+            if [[ -s "$response_file" ]]; then
+              echo "Response body:"
+              cat "$response_file"
+            fi
+
+            exit 1
+          fi
+
+          echo "Microsoft Teams notification sent successfully"
+
+      - name: Record skipped Teams notification
+        if: ${{ steps.teams.outputs.configured != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo
+            echo "### Microsoft Teams notification"
+            echo
+            echo "Notification was skipped because TEAMS_WEBHOOK_URL is not configured."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,300 @@
+name: Reusable Dependency Review
+
+on:
+  workflow_call:
+    inputs:
+      fail_on_dependency:
+        description: NONE, UNKNOWN, LOW, MEDIUM, HIGH, or CRITICAL
+        required: false
+        default: CRITICAL
+        type: string
+
+    outputs:
+      scan_status:
+        description: Dependency scan status
+        value: ${{ jobs.dependency_review.outputs.scan_status }}
+
+  workflow_dispatch:
+    inputs:
+      fail_on_dependency:
+        description: Dependency failure threshold
+        required: false
+        default: CRITICAL
+        type: choice
+        options:
+          - NONE
+          - UNKNOWN
+          - LOW
+          - MEDIUM
+          - HIGH
+          - CRITICAL
+
+permissions:
+  contents: read
+
+jobs:
+  dependency_review:
+    name: Dependency Security Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    outputs:
+      scan_status: ${{ steps.status.outputs.scan_status }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate dependency reporting script
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f \
+            scripts/generate-dependency-report.py || {
+            echo "::error::generate-dependency-report.py is missing"
+            exit 1
+          }
+
+          python3 -m py_compile \
+            scripts/generate-dependency-report.py
+
+      - name: Detect dependency manifests
+        id: manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest="$(
+            find . \
+              -type f \
+              \( \
+                -name 'package-lock.json' \
+                -o -name 'yarn.lock' \
+                -o -name 'pnpm-lock.yaml' \
+                -o -name 'requirements.txt' \
+                -o -name 'poetry.lock' \
+                -o -name 'Pipfile.lock' \
+                -o -name 'pom.xml' \
+                -o -name 'build.gradle' \
+                -o -name 'build.gradle.kts' \
+                -o -name 'packages.lock.json' \
+                -o -name 'go.mod' \
+                -o -name 'go.sum' \
+                -o -name 'Cargo.lock' \
+                -o -name 'composer.lock' \
+              \) \
+              -not -path './.git/*' \
+              -print \
+              -quit
+          )"
+
+          if [[ -n "$manifest" ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "Dependency manifest: $manifest"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No supported dependency manifest found"
+          fi
+
+      - name: Install OSV Scanner
+        if: ${{ steps.manifests.outputs.present == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="v2.0.2"
+
+          curl \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            --output osv-scanner.zip \
+            "https://github.com/google/osv-scanner/releases/download/${version}/osv-scanner_linux_amd64.zip"
+
+          unzip -q osv-scanner.zip
+
+          sudo install \
+            -m 0755 \
+            osv-scanner \
+            /usr/local/bin/osv-scanner
+
+          osv-scanner --version
+
+      - name: Run OSV Scanner
+        if: ${{ steps.manifests.outputs.present == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p reports/dependencies
+
+          set +e
+
+          osv-scanner scan \
+            --recursive \
+            --format json \
+            --output \
+            reports/dependencies/dependency-review.json \
+            .
+
+          scanner_exit_code=$?
+
+          set -e
+
+          echo "OSV Scanner exit code: $scanner_exit_code"
+
+          test -s \
+            reports/dependencies/dependency-review.json || {
+            echo "::error::Dependency JSON report is missing"
+            exit 1
+          }
+
+      - name: Create non-applicable dependency report
+        if: ${{ steps.manifests.outputs.present != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p reports/dependencies
+
+          cat > \
+            reports/dependencies/dependency-review.json \
+            <<'JSON'
+          {
+            "results": [],
+            "status": "not_applicable",
+            "reason": "No supported dependency manifest was detected"
+          }
+          JSON
+
+      - name: Generate dependency report formats
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 -m pip install \
+            --disable-pip-version-check \
+            pyyaml
+
+          python3 \
+            scripts/generate-dependency-report.py \
+            reports/dependencies/dependency-review.json \
+            reports/dependencies \
+            --repository "${{ github.repository }}" \
+            --sha "${{ github.sha }}"
+
+      - name: Set dependency status
+        id: status
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          status="$(
+            python3 - <<'PY'
+          from pathlib import Path
+
+          import yaml
+
+          document = yaml.safe_load(
+              Path(
+                  "reports/dependencies/"
+                  "dependency-status.yaml"
+              ).read_text(encoding="utf-8")
+          )
+
+          print(
+              document.get(
+                  "control",
+                  {},
+              ).get(
+                  "status",
+                  "missing",
+              )
+          )
+          PY
+          )"
+
+          echo "scan_status=$status" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Apply dependency threshold
+        env:
+          FAIL_ON_DEPENDENCY: >-
+            ${{ inputs.fail_on_dependency || vars.FAIL_ON_DEPENDENCY || 'CRITICAL' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          import yaml
+
+          levels = {
+              "UNKNOWN": 0,
+              "LOW": 1,
+              "MEDIUM": 2,
+              "HIGH": 3,
+              "CRITICAL": 4,
+              "NONE": 10_000,
+          }
+
+          threshold_name = os.getenv(
+              "FAIL_ON_DEPENDENCY",
+              "CRITICAL",
+          ).strip().upper()
+
+          if threshold_name not in levels:
+              raise SystemExit(
+                  "Invalid FAIL_ON_DEPENDENCY: "
+                  f"{threshold_name}"
+              )
+
+          document = yaml.safe_load(
+              Path(
+                  "reports/dependencies/"
+                  "dependency-review.yaml"
+              ).read_text(encoding="utf-8")
+          )
+
+          summary = document.get("summary", {})
+          severity = summary.get("severity", {})
+
+          blocking = 0
+
+          if threshold_name != "NONE":
+              threshold = levels[threshold_name]
+
+              for severity_name, count in severity.items():
+                  rank = levels.get(
+                      str(severity_name).upper(),
+                      levels["UNKNOWN"],
+                  )
+
+                  if rank >= threshold:
+                      blocking += int(count)
+
+          print(
+              f"Dependency threshold: {threshold_name}"
+          )
+          print(
+              f"Blocking dependency findings: {blocking}"
+          )
+
+          if blocking:
+              raise SystemExit(1)
+          PY
+
+      - name: Upload dependency reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-reports-${{ github.sha }}
+          path: reports/dependencies/
+          if-no-files-found: warn
+          retention-days: 30
